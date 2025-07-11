@@ -22,7 +22,7 @@ RAW_COUNT_HEURISTIC_THRESHOLD = 35
 # THIS SHOULD ONLY BE USED FOR INFERENCE
 def create_dataloader(
     cfg,
-    workers=1,
+    workers=8,
     data_dir=None,
     datasets=None,
     shape_dict=None,
@@ -63,6 +63,7 @@ def create_dataloader(
         collate_fn=sentence_collator,
         num_workers=workers,
         persistent_workers=True,
+        pin_memory=True,
     )
     return dataloader
 

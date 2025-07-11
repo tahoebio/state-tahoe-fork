@@ -145,6 +145,9 @@ class Inference:
         adata = anndata.read_h5ad(input_adata_path)
         if dataset_name is None:
             dataset_name = Path(input_adata_path).stem
+        if batch_size is not None:
+            log.info(f"Overriding batch size from {self._vci_conf.model.batch_size} to {batch_size}")
+            self._vci_conf.model.batch_size = batch_size
 
         dataloader = create_dataloader(
             self._vci_conf,
