@@ -43,6 +43,50 @@ def load_hydra_config(method: str, overrides: list[str] = None) -> DictConfig:
     return cfg
 
 
+def show_hydra_help(method: str):
+    """Show Hydra configuration help with all parameters"""
+    from omegaconf import OmegaConf
+    
+    # Load the default config to show structure
+    cfg = load_hydra_config(method)
+    
+    print("Hydra Configuration Help")
+    print("=" * 50)
+    print(f"Configuration for method: {method}")
+    print()
+    print("Full configuration structure:")
+    print(OmegaConf.to_yaml(cfg))
+    print()
+    print("Usage examples:")
+    print("  Override single parameter:")
+    print(f"    uv run state tx train data.batch_size=64")
+    print()
+    print("  Override nested parameter:")
+    print(f"    uv run state tx train model.kwargs.hidden_dim=512")
+    print()
+    print("  Override multiple parameters:")
+    print(f"    uv run state tx train data.batch_size=64 training.lr=0.001")
+    print()
+    print("  Change config group:")
+    print(f"    uv run state tx train data=custom_data model=custom_model")
+    print()
+    print("Available config groups:")
+    
+    # Show available config groups
+    import os
+    from pathlib import Path
+    
+    config_dir = Path(__file__).parent / "configs"
+    if config_dir.exists():
+        for item in config_dir.iterdir():
+            if item.is_dir() and not item.name.startswith('.'):
+                configs = [f.stem for f in item.glob("*.yaml")]
+                if configs:
+                    print(f"  {item.name}: {', '.join(configs)}")
+    
+    exit(0)
+
+
 def main():
     args = get_args()
 
@@ -57,9 +101,13 @@ def main():
         case "tx":
             match args.subcommand:
                 case "train":
-                    # Load Hydra config with overrides for sets training
-                    cfg = load_hydra_config("tx", args.hydra_overrides)
-                    run_tx_train(cfg)
+                    if hasattr(args, 'help') and args.help:
+                        # Show Hydra configuration help
+                        show_hydra_help("tx")
+                    else:
+                        # Load Hydra config with overrides for sets training
+                        cfg = load_hydra_config("tx", args.hydra_overrides)
+                        run_tx_train(cfg)
                 case "predict":
                     # For now, predict uses argparse and not hydra
                     run_tx_predict(args)

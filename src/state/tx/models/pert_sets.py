@@ -176,6 +176,8 @@ class PertSetsPerturbationModel(PerturbationModel):
         else:
             raise ValueError(f"Unknown loss function: {loss_name}")
 
+        self.use_basal_projection = kwargs.get("use_basal_projection", True)
+
         # Build the underlying neural OT network
         self._build_networks()
 
@@ -267,7 +269,17 @@ class PertSetsPerturbationModel(PerturbationModel):
         )
 
         # Simple linear layer that maintains the input dimension
-        self.basal_encoder = nn.Linear(self.input_dim, self.hidden_dim)
+        if self.use_basal_projection:
+            self.basal_encoder = build_mlp(
+                in_dim=self.input_dim,
+                out_dim=self.hidden_dim,
+                hidden_dim=self.hidden_dim,
+                n_layers=self.n_encoder_layers,
+                dropout=self.dropout,
+                activation=self.activation_class,
+            )
+        else:
+            self.basal_encoder = nn.Linear(self.input_dim, self.hidden_dim)
 
         self.transformer_backbone, self.transformer_model_dim = get_transformer_backbone(
             self.transformer_backbone_key,

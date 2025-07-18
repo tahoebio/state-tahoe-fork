@@ -12,7 +12,7 @@ from torch import nn
 from .nn.model import StateEmbeddingModel
 from .train.trainer import get_embeddings
 from .data import create_dataloader
-from .utils import get_embedding_cfg
+from .utils import get_embedding_cfg, get_precision_config
 
 log = logging.getLogger(__name__)
 
@@ -95,11 +95,17 @@ class Inference:
 
         # Load and initialize model for eval
         self.model = StateEmbeddingModel.load_from_checkpoint(checkpoint, dropout=0.0, strict=False)
+        
+        # Convert model to appropriate precision for faster inference
+        device_type = 'cuda' if torch.cuda.is_available() else 'cpu'
+        precision = get_precision_config(device_type=device_type)
+        self.model = self.model.to(precision)
+        
         all_pe = self.protein_embeds or get_embeddings(self._vci_conf)
         if isinstance(all_pe, dict):
             all_pe = torch.vstack(list(all_pe.values()))
         self.model.pe_embedding = nn.Embedding.from_pretrained(all_pe)
-        self.model.pe_embedding.to(self.model.device)
+        self.model.pe_embedding.to(self.model.device, dtype=precision)
         self.model.binary_decoder.requires_grad = False
         self.model.eval()
 
@@ -118,20 +124,25 @@ class Inference:
 
     def get_gene_embedding(self, genes):
         protein_embeds = [self.protein_embeds[x] if x in self.protein_embeds else torch.zeros(5120) for x in genes]
-        protein_embeds = torch.stack(protein_embeds).to(self.model.device)
+        device_type = 'cuda' if torch.cuda.is_available() else 'cpu'
+        precision = get_precision_config(device_type=device_type)
+        protein_embeds = torch.stack(protein_embeds).to(self.model.device, dtype=precision)
         return self.model.gene_embedding_layer(protein_embeds)
 
     def encode(self, dataloader, rda=None):
         with torch.no_grad():
-            for i, batch in enumerate(dataloader):
-                torch.cuda.empty_cache()
-                _, _, _, emb, ds_emb = self.model._compute_embedding_for_batch(batch)
-                embeddings = emb.detach().cpu().numpy()
+            device_type = 'cuda' if torch.cuda.is_available() else 'cpu'
+            precision = get_precision_config(device_type=device_type)
+            with torch.autocast(device_type=device_type, dtype=precision):
+                for i, batch in enumerate(dataloader):
+                    torch.cuda.empty_cache()
+                    _, _, _, emb, ds_emb = self.model._compute_embedding_for_batch(batch)
+                    embeddings = emb.detach().cpu().float().numpy()
 
-                ds_emb = self.model.dataset_embedder(ds_emb)
-                ds_embeddings = ds_emb.detach().cpu().numpy()
+                    ds_emb = self.model.dataset_embedder(ds_emb)
+                    ds_embeddings = ds_emb.detach().cpu().float().numpy()
 
-                yield embeddings, ds_embeddings
+                    yield embeddings, ds_embeddings
 
     def encode_adata(
         self,
@@ -149,6 +160,8 @@ class Inference:
             log.info(f"Overriding batch size from {self._vci_conf.model.batch_size} to {batch_size}")
             self._vci_conf.model.batch_size = batch_size
 
+        device_type = 'cuda' if torch.cuda.is_available() else 'cpu'
+        precision = get_precision_config(device_type=device_type)
         dataloader = create_dataloader(
             self._vci_conf,
             adata=adata,
@@ -157,6 +170,7 @@ class Inference:
             data_dir=os.path.dirname(input_adata_path),
             shuffle=False,
             protein_embeds=self.protein_embeds,
+            precision=precision,
         )
 
         all_embeddings = []
@@ -167,9 +181,9 @@ class Inference:
                 all_ds_embeddings.append(ds_embeddings)
 
         # attach this as a numpy array to the adata and write it out
-        all_embeddings = np.concatenate(all_embeddings, axis=0)
+        all_embeddings = np.concatenate(all_embeddings, axis=0).astype(np.float32)
         if len(all_ds_embeddings) > 0:
-            all_ds_embeddings = np.concatenate(all_ds_embeddings, axis=0)
+            all_ds_embeddings = np.concatenate(all_ds_embeddings, axis=0).astype(np.float32)
 
             # concatenate along axis -1 with all embeddings
             all_embeddings = np.concatenate([all_embeddings, all_ds_embeddings], axis=-1)
@@ -188,20 +202,23 @@ class Inference:
             cell_embs = adata.obsm[emb_key]
         except:
             cell_embs = adata.X
-        cell_embs = torch.Tensor(cell_embs).to(self.model.device)
+        device_type = 'cuda' if torch.cuda.is_available() else 'cpu'
+        precision = get_precision_config(device_type=device_type)
+        cell_embs = torch.Tensor(cell_embs).to(self.model.device, dtype=precision)
 
         use_rda = getattr(self.model.cfg.model, "rda", False)
         if use_rda and read_depth is None:
             read_depth = 1000.0
 
         gene_embeds = self.get_gene_embedding(genes)
-        for i in tqdm(range(0, cell_embs.size(0), batch_size), total=int(cell_embs.size(0) // batch_size)):
-            cell_embeds_batch = cell_embs[i : i + batch_size]
-            if use_rda:
-                task_counts = torch.full((cell_embeds_batch.shape[0],), read_depth, device=self.model.device)
-            else:
-                task_counts = None
-            merged_embs = StateEmbeddingModel.resize_batch(cell_embeds_batch, gene_embeds, task_counts)
-            logprobs_batch = self.model.binary_decoder(merged_embs)
-            logprobs_batch = logprobs_batch.detach().cpu().numpy()
-            yield logprobs_batch.squeeze()
+        with torch.autocast(device_type=device_type, dtype=precision):
+            for i in tqdm(range(0, cell_embs.size(0), batch_size), total=int(cell_embs.size(0) // batch_size)):
+                cell_embeds_batch = cell_embs[i : i + batch_size]
+                if use_rda:
+                    task_counts = torch.full((cell_embeds_batch.shape[0],), read_depth, device=self.model.device, dtype=precision)
+                else:
+                    task_counts = None
+                merged_embs = StateEmbeddingModel.resize_batch(cell_embeds_batch, gene_embeds, task_counts)
+                logprobs_batch = self.model.binary_decoder(merged_embs)
+                logprobs_batch = logprobs_batch.detach().cpu().float().numpy()
+                yield logprobs_batch.squeeze()

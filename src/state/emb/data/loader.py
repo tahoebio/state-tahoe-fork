@@ -31,6 +31,7 @@ def create_dataloader(
     shuffle=False,
     sentence_collator=None,
     protein_embeds=None,
+    precision=None,
 ):
     """
     Expected to be used for inference
@@ -50,7 +51,7 @@ def create_dataloader(
     )
     if sentence_collator is None:
         sentence_collator = VCIDatasetSentenceCollator(
-            cfg, valid_gene_mask=dataset.valid_gene_index, ds_emb_mapping_inference=dataset.ds_emb_map, is_train=False
+            cfg, valid_gene_mask=dataset.valid_gene_index, ds_emb_mapping_inference=dataset.ds_emb_map, is_train=False, precision=precision
         )
 
     # validation should not use cell augmentations
@@ -249,13 +250,14 @@ class FilteredGenesCounts(H5adSentenceDataset):
 
 
 class VCIDatasetSentenceCollator(object):
-    def __init__(self, cfg, valid_gene_mask=None, ds_emb_mapping_inference=None, is_train=True):
+    def __init__(self, cfg, valid_gene_mask=None, ds_emb_mapping_inference=None, is_train=True, precision=None):
         self.pad_length = cfg.dataset.pad_length
         self.P = cfg.dataset.P
         self.N = cfg.dataset.N
         self.S = cfg.dataset.S
         self.cfg = cfg
         self.training = is_train
+        self.precision = precision
 
         # Load the dataset mappings
         self.use_dataset_info = getattr(cfg.model, "dataset_correction", False)
@@ -411,6 +413,17 @@ class VCIDatasetSentenceCollator(object):
             if self.cfg.model.counts and cell_sentence_counts is not None:
                 batch_sentences_counts[i, :] = cell_sentence_counts
             i += 1
+
+        # Cast tensors to specified precision if provided
+        if self.precision is not None:
+            # batch_sentences = batch_sentences.to(dtype=self.precision)
+            # Xs = Xs.to(dtype=self.precision)
+            Ys = Ys.to(dtype=self.precision)
+            batch_weights = batch_weights.to(dtype=self.precision)
+            if total_counts_all is not None:
+                total_counts_all = total_counts_all.to(dtype=self.precision)
+            if batch_sentences_counts is not None:
+                batch_sentences_counts = batch_sentences_counts.to(dtype=self.precision)
 
         return (
             batch_sentences[:, :max_len],

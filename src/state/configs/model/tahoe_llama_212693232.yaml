@@ -21,6 +21,7 @@ kwargs:
   nb_decoder: False
   mask_attn: False
   use_effect_gating_token: False
+  use_basal_projection: False
   distributional_loss: energy
   init_from: null
   transformer_backbone_key: llama

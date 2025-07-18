@@ -228,7 +228,7 @@ class StateEmbeddingModel(L.LightningModule):
         batch_sentences = self.pe_embedding(batch_sentences)
         X = self.pe_embedding(X)
 
-        # Normalize token outputs now # TODO YANAY EXPERIMENT WITH REMOVING THIS
+        # Normalize token outputs now
         batch_sentences = nn.functional.normalize(batch_sentences, dim=2)
 
         # Add a learnable CLS token to the beginning of the sentence

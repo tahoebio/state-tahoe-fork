@@ -19,6 +19,7 @@ kwargs:
   batch_encoder: False # if true, batch variables are used
   nb_decoder: False # if true, use a negative binomial decoder
   decoder_loss_weight: 1.0
+  use_basal_projection: False
   mask_attn: False # if true, mask the attention
   distributional_loss: energy
   regularization: 0.0

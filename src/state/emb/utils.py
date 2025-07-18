@@ -1,6 +1,7 @@
 import os
 import pandas as pd
 import numpy as np
+import torch
 
 from scipy.stats import pearsonr
 from sklearn.metrics.pairwise import cosine_similarity
@@ -99,6 +100,23 @@ def get_embedding_cfg(cfg):
 
 def get_dataset_cfg(cfg):
     return cfg.dataset[cfg.dataset.current]
+
+
+def get_precision_config(device_type='cuda'):
+    """
+    Single source of truth for precision configuration.
+    
+    Args:
+        device_type: Device type ('cuda' or 'cpu')
+    
+    Returns:
+        torch.dtype: The precision to use for autocast and model operations.
+                    Returns torch.bfloat16 for CUDA, torch.float32 for CPU.
+    """
+    if device_type == 'cuda':
+        return torch.bfloat16
+    else:
+        return torch.float32
 
 
 def compute_pearson_delta(pred, true, ctrl, ctrl_true):
