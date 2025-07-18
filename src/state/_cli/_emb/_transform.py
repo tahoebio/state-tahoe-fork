@@ -90,7 +90,7 @@ def run_emb_transform(args: ap.ArgumentParser):
                 stem, ext = os.path.splitext(filename)
             output_file = os.path.join(target_dir, f"{stem}_state_embs{ext}")
 
-            logger.info(f"Computing embeddings for {input_file}")
+            logger.info(f"Computing embeddings for {input_file} -> {output_file}")
             inferer.encode_adata(
                 input_adata_path=input_file,
                 output_adata_path=output_file,
