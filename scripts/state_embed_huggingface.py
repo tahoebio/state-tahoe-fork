@@ -11,7 +11,7 @@ from state.emb.inference import Inference
 from torch.utils.data import Dataset, DataLoader
 from tqdm.auto import tqdm
 
-# === Constants ===
+# === Arguments ===
 DATASET_PATH = "/tahoe/mosaicfm/datasets/Tahoe-100M-HF"
 DATASET_SPLIT = "train"
 CACHE_DIR = "/tahoe/mosaicfm/datasets/HF_cache"
@@ -22,6 +22,7 @@ BATCH_SIZE = 256
 NUM_WORKERS = 8
 PREFETCH_FACTOR = 4
 CHUNK_SIZE = 100_000
+COMPILE=False
 
 
 class FilteredGenesCountsTahoe(Dataset):
@@ -64,12 +65,11 @@ global_pos = {g: i for i, g in enumerate(valid_genes)}
 gene_metadata["state_token_id"] = gene_metadata["gene_symbol"].apply(lambda g: global_pos.get(g, -1))
 reverse_token_id = dict(zip(gene_metadata["token_id"].values, gene_metadata.index.values))
 
-dataset = FilteredGenesCountsTahoe(source_dataset=ds,
-                                   reverse_token_id=reverse_token_id)
 
-# === Collator & DataLoader ===
+# === Model & DataLoader Setup ===
+dataset = FilteredGenesCountsTahoe(source_dataset=ds, reverse_token_id=reverse_token_id)
 config = OmegaConf.load(f"{MODEL_DIR}/config.yaml")
-config.model.batch_size = BATCH_SIZE
+config.model.batch_size = BATCH_SIZE # Override batch size for inference
 
 collator = VCIDatasetSentenceCollator(
     config,
@@ -90,14 +90,14 @@ dataloader = DataLoader(
     prefetch_factor=PREFETCH_FACTOR,
 )
 
-# === Load Model ===
 inference = Inference(cfg=config, protein_embeds=protein_embeds)
 inference.load_model(os.path.join(MODEL_DIR, CHECKPOINT_FILE))
-
-model = torch.compile(inference.model)
+model = inference.model
+if COMPILE:
+    model= torch.compile(model, mode="default", fullgraph=True)
 device = next(model.parameters()).device
 
-# === Prepare Output Schema ===
+# === Output Schema ===
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 schema = pa.schema([
@@ -105,7 +105,7 @@ schema = pa.schema([
     pa.field("state_embeddings", pa.list_(pa.float32(), 2048)),
 ])
 
-# === Inference & Writing ===
+# === Inference & Write Loop ===
 row_count = 0
 shard_idx = 0
 writer = None
@@ -120,7 +120,6 @@ with torch.no_grad(), torch.amp.autocast(enabled=True, dtype=torch.bfloat16, dev
         _, _, _, emb, _ = model._compute_embedding_for_batch(batch)
         embeddings = emb.to("cpu").to(torch.float32).numpy()
         indices = batch[3]
-
         table = pa.Table.from_pydict({
             "dataset_index": indices,
             "state_embeddings": [list(row) for row in embeddings],
