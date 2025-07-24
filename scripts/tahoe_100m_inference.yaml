@@ -1,0 +1,21 @@
+data:
+  dataset_path: /tahoe/mosaicfm/datasets/Tahoe-100M-HF
+  split: train
+  cache_dir: /tahoe/mosaicfm/datasets/HF_cache
+  gene_metadata_path: tahoebio/Tahoe-100M
+  gene_metadata_config: gene_metadata
+
+model:
+  model_dir: /home/shreshth/state-tahoe-fork/SE-600M
+  checkpoint_file: se600m_epoch4.ckpt
+  protein_embed_path: /home/shreshth/state-tahoe-fork/SE-600M/protein_embeddings.pt
+
+inference:
+  batch_size: 256
+  num_workers: 8
+  prefetch_factor: 4
+  compile: false
+
+output:
+  dir: /tahoe/mosaicfm/datasets/state_embeddings_tahoe_100m_w_idx
+  chunk_size: 100000
