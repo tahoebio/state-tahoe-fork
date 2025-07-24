@@ -1,10 +1,11 @@
+import logging
 import os
 import sys
-import logging
+
 import numpy as np
 import pyarrow as pa
-import pyarrow.parquet as pq
 import pyarrow.fs as pafs
+import pyarrow.parquet as pq
 import torch
 import torch.distributed as dist
 from datasets import load_dataset
@@ -81,7 +82,12 @@ def main(cfg: DictConfig) -> None:
 
     log.info(f"Rank {rank} started with local_rank {local_rank}...")
 
-    ds = load_dataset(cfg.data.dataset_path, split=cfg.data.split, cache_dir=cfg.data.cache_dir).with_format("torch")
+    ds = load_dataset(
+        cfg.data.dataset_path,
+        split=cfg.data.split,
+        cache_dir=cfg.data.get("cache_dir", None)
+    ).with_format("torch")
+
     gene_metadata = load_dataset(cfg.data.gene_metadata_path, cfg.data.gene_metadata_config)["train"].to_pandas()
     protein_embeds = torch.load(cfg.model.protein_embed_path, weights_only=False, map_location="cpu")
 
