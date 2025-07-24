@@ -1,8 +1,10 @@
 import os
+import sys
 import logging
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
+import pyarrow.fs as pafs
 import torch
 import torch.distributed as dist
 from datasets import load_dataset
@@ -55,6 +57,23 @@ def cleanup():
     dist.destroy_process_group()
 
 
+def get_output_filesystem_and_path(output_dir: str):
+    if output_dir.startswith("s3://"):
+        fs = pafs.S3FileSystem()
+        path = output_dir[5:]  # strip s3://
+    else:
+        fs = pafs.LocalFileSystem()
+        path = output_dir
+    return fs, path
+
+
+def get_parquet_writer(fs, path_prefix, rank, shard_idx, schema):
+    file_path = f"{path_prefix}/rank{rank}_state_{shard_idx:03d}.parquet"
+    sink = fs.open_output_stream(file_path)
+    writer = pq.ParquetWriter(sink, schema, use_dictionary=True)
+    return writer, sink
+
+
 def main(cfg: DictConfig) -> None:
     local_rank = setup()
     rank = dist.get_rank()
@@ -103,20 +122,20 @@ def main(cfg: DictConfig) -> None:
         model = torch.compile(model, mode="default", fullgraph=True)
     model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[local_rank])
 
-    os.makedirs(cfg.output.dir, exist_ok=True)
     schema = pa.schema([
         pa.field("dataset_index", pa.int32()),
         pa.field("state_embeddings", pa.list_(pa.float32(), 2048)),
     ])
 
-    row_count, shard_idx, writer = 0, 0, None
+    fs, output_path = get_output_filesystem_and_path(cfg.output.dir)
+
+    row_count, shard_idx, writer, sink = 0, 0, None, None
     pbar = tqdm(total=len(sampler), desc=f"Rank {rank} writing", disable=(rank != 0))
 
     with torch.no_grad(), torch.amp.autocast(enabled=True, dtype=torch.bfloat16, device_type="cuda"):
         for batch in dataloader:
             if writer is None:
-                shard_path = os.path.join(cfg.output.dir, f"rank{rank}_state_{shard_idx:03d}.parquet")
-                writer = pq.ParquetWriter(shard_path, schema, use_dictionary=True)
+                writer, sink = get_parquet_writer(fs, output_path, rank, shard_idx, schema)
 
             _, _, _, emb, _ = model.module._compute_embedding_for_batch(batch)
             embeddings = emb.to("cpu").to(torch.float32).numpy()
@@ -132,18 +151,21 @@ def main(cfg: DictConfig) -> None:
 
             if row_count >= cfg.output.chunk_size:
                 writer.close()
-                writer = None
+                sink.close()
                 row_count = 0
                 shard_idx += 1
+                writer, sink = get_parquet_writer(fs, output_path, rank, shard_idx, schema)
 
     if writer:
         writer.close()
+    if sink:
+        sink.close()
+
     pbar.close()
     cleanup()
 
 
 if __name__ == "__main__":
-    import sys
     yaml_path = sys.argv[1]
     log.info(f"Loading configuration from {yaml_path}...")
     cfg = om.load(yaml_path)

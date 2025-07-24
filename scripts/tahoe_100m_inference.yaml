@@ -17,5 +17,5 @@ inference:
   compile: false
 
 output:
-  dir: /tahoe/mosaicfm/datasets/state_embeddings_tahoe_100m_w_idx
+  dir: "s3://vevo-ml-datasets/state/tahoe_embeddings/tahoe_100m_se_600m_epoch4"
   chunk_size: 100000
