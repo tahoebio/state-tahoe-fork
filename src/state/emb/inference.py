@@ -1,17 +1,18 @@
-import os
 import logging
-import torch
+import os
+from pathlib import Path
+from typing import Optional
+
 import anndata
 import h5py as h5
 import numpy as np
-
-from pathlib import Path
-from tqdm import tqdm
+import torch
 from torch import nn
+from tqdm import tqdm
 
+from .data import create_dataloader
 from .nn.model import StateEmbeddingModel
 from .train.trainer import get_embeddings
-from .data import create_dataloader
 from .utils import get_embedding_cfg, get_precision_config
 
 log = logging.getLogger(__name__)
@@ -87,30 +88,40 @@ class Inference:
                     output_h5f[f"/obsm/{obsm_key}"].resize(
                         (output_h5f[f"/obsm/{obsm_key}"].shape[0] + data.shape[0]), axis=0
                     )
-                    output_h5f[f"/obsm/{obsm_key}"][-data.shape[0] :] = data
+                    output_h5f[f"/obsm/{obsm_key}"][-data.shape[0]:] = data
 
-    def load_model(self, checkpoint):
+    def load_model(self, checkpoint: str, device: Optional[torch.device] = None):
         if self.model:
             raise ValueError("Model already initialized")
 
-        # Load and initialize model for eval
-        self.model = StateEmbeddingModel.load_from_checkpoint(checkpoint, dropout=0.0, strict=False)
-        
-        # Convert model to appropriate precision for faster inference
-        device_type = 'cuda' if torch.cuda.is_available() else 'cpu'
-        precision = get_precision_config(device_type=device_type)
-        self.model = self.model.to(precision)
-        
+        self.model = StateEmbeddingModel.load_from_checkpoint(
+            checkpoint,
+            dropout=0.0,
+            strict=False,
+            map_location="cpu"
+        )
+
         all_pe = self.protein_embeds or get_embeddings(self._vci_conf)
         if isinstance(all_pe, dict):
             all_pe = torch.vstack(list(all_pe.values()))
-        self.model.pe_embedding = nn.Embedding.from_pretrained(all_pe)
-        self.model.pe_embedding.to(self.model.device, dtype=precision)
+        pe_embedding = nn.Embedding.from_pretrained(all_pe)
+        if device is None:
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+        device_type = device.type
+        precision = get_precision_config(device_type=device_type)
+
+        self.model = self.model.to(device, dtype=precision)
+        pe_embedding = pe_embedding.to(device, dtype=precision)
+
+        self.model.pe_embedding = pe_embedding
         self.model.binary_decoder.requires_grad = False
         self.model.eval()
-
         if self.protein_embeds is None:
-            self.protein_embeds = torch.load(get_embedding_cfg(self._vci_conf).all_embeddings, weights_only=False)
+            self.protein_embeds = torch.load(
+                get_embedding_cfg(self._vci_conf).all_embeddings,
+                weights_only=False
+            )
 
     def init_from_model(self, model, protein_embeds=None):
         """
@@ -145,17 +156,20 @@ class Inference:
                     yield embeddings, ds_embeddings
 
     def encode_adata(
-        self,
-        input_adata_path: str,
-        output_adata_path: str,
-        emb_key: str = "X_emb",
-        dataset_name=None,
-        batch_size: int = 32,
+            self,
+            input_adata_path: str,
+            output_adata_path: str,
+            emb_key: str = "X_emb",
+            dataset_name=None,
+            batch_size: int = 32,
     ):
         shape_dict = self.__load_dataset_meta(input_adata_path)
         adata = anndata.read_h5ad(input_adata_path)
         if dataset_name is None:
             dataset_name = Path(input_adata_path).stem
+        if batch_size is not None:
+            log.info(f"Overriding batch size from {self._vci_conf.model.batch_size} to {batch_size}")
+            self._vci_conf.model.batch_size = batch_size
 
         device_type = 'cuda' if torch.cuda.is_available() else 'cpu'
         precision = get_precision_config(device_type=device_type)
@@ -210,9 +224,10 @@ class Inference:
         gene_embeds = self.get_gene_embedding(genes)
         with torch.autocast(device_type=device_type, dtype=precision):
             for i in tqdm(range(0, cell_embs.size(0), batch_size), total=int(cell_embs.size(0) // batch_size)):
-                cell_embeds_batch = cell_embs[i : i + batch_size]
+                cell_embeds_batch = cell_embs[i: i + batch_size]
                 if use_rda:
-                    task_counts = torch.full((cell_embeds_batch.shape[0],), read_depth, device=self.model.device, dtype=precision)
+                    task_counts = torch.full((cell_embeds_batch.shape[0],), read_depth, device=self.model.device,
+                                             dtype=precision)
                 else:
                     task_counts = None
                 merged_embs = StateEmbeddingModel.resize_batch(cell_embeds_batch, gene_embeds, task_counts)
