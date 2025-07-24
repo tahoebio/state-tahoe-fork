@@ -122,8 +122,17 @@ def main(cfg: DictConfig) -> None:
     )
 
     inference = Inference(cfg=checkpoint_config, protein_embeds=protein_embeds)
-    inference.load_model(os.path.join(cfg.model.model_dir, cfg.model.checkpoint_file))
-    model = inference.model.to(local_rank)
+
+    # Set per-rank device
+    device = torch.device(f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu")
+    torch.cuda.empty_cache()
+
+    # Coordinated model loading
+    dist.barrier()
+    inference.load_model(os.path.join(cfg.model.model_dir, cfg.model.checkpoint_file), device=device)
+    dist.barrier()
+
+    model = inference.model
     if cfg.inference.compile:
         model = torch.compile(model, mode="default", fullgraph=True)
     model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[local_rank])
