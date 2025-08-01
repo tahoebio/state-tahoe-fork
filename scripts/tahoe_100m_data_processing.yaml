@@ -5,5 +5,4 @@ out_dir: "/tahoe/state_tahoe/h5ad_chunks"
 chunk_size: 200000
 target_sum: 1872 # Median library size for Tahoe-100M (pass_filter="full"), considering all genes
 batch_size: 200000
-max_chunks: None
 world_size: 8

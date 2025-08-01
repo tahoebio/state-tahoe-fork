@@ -110,8 +110,9 @@ def main(cfg: DictConfig):
             idx += 1
             offset += next_chunk_size
             pbar.update(next_chunk_size)
+            max_chunks = cfg.get('max_chunks', None)
 
-            if cfg.max_chunks is not None and idx >= cfg.max_chunks:
+            if max_chunks is not None and idx >= max_chunks:
                 log.info("Reached max_chunks limit — exiting early.")
                 break
 
