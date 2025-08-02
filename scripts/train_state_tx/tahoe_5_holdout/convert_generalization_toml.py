@@ -9,6 +9,7 @@ import re
 import ast
 import toml
 import polars as pl
+import argparse
 from pathlib import Path
 
 
@@ -54,11 +55,13 @@ def load_cell_line_mapping():
     return mapping
 
 
-def convert_toml_file(input_path, output_path):
+def convert_toml_file(input_path, output_path, enable_drug_conversion=True, enable_cell_conversion=True):
     """Convert the TOML file with corrected nomenclatures"""
-    # Load cell line mapping
-    cell_mapping = load_cell_line_mapping()
-    print(f"Loaded cell line mapping for {len(cell_mapping)} cell lines")
+    # Load cell line mapping if needed
+    cell_mapping = {}
+    if enable_cell_conversion:
+        cell_mapping = load_cell_line_mapping()
+        print(f"Loaded cell line mapping for {len(cell_mapping)} cell lines")
     
     # Load the TOML file
     with open(input_path, 'r') as f:
@@ -71,8 +74,10 @@ def convert_toml_file(input_path, output_path):
         new_fewshot = {}
         
         for key, splits in data['fewshot'].items():
-            # Extract cell line name from key like "tahoe_holdout.C32"
-            if '.' in key:
+            new_key = key
+            
+            # Convert cell names if enabled
+            if enable_cell_conversion and '.' in key:
                 dataset, cell_name = key.split('.', 1)
                 
                 # Convert cell name to CVCL ID
@@ -82,14 +87,11 @@ def convert_toml_file(input_path, output_path):
                     print(f"Converting {key} -> {new_key}")
                 else:
                     print(f"Warning: Cell line '{cell_name}' not found in mapping, keeping original")
-                    new_key = key
-            else:
-                new_key = key
             
             # Convert drug dosages in val and test arrays
             new_splits = {}
             for split_type, drug_list in splits.items():
-                if isinstance(drug_list, list):
+                if isinstance(drug_list, list) and enable_drug_conversion:
                     converted_drugs = []
                     for drug_dosage in drug_list:
                         converted_drug = convert_drug_dosage_to_drug_dose(drug_dosage)
@@ -111,14 +113,44 @@ def convert_toml_file(input_path, output_path):
 
 
 def main():
-    input_path = "/tahoe/drive_3/ANALYSIS/analysis_190/Code/train_state_tx/tahoe_5_holdout/generalization.toml"
-    output_path = "/tahoe/drive_3/ANALYSIS/analysis_190/Code/train_state_tx/tahoe_5_holdout/generalization_converted.toml"
+    parser = argparse.ArgumentParser(
+        description="Convert generalization.toml file to use correct nomenclatures"
+    )
+    parser.add_argument(
+        "input_path",
+        help="Path to input TOML file"
+    )
+    parser.add_argument(
+        "output_path", 
+        help="Path to output TOML file"
+    )
+    parser.add_argument(
+        "--enable-drug-conversion",
+        action="store_true",
+        default=False,
+        help="Enable conversion of drug dosage format from [('Drug name', concentration, 'uM')] to 'Drug_name_dose'"
+    )
+    parser.add_argument(
+        "--enable-cell-conversion",
+        action="store_true", 
+        default=False,
+        help="Enable conversion of cell line names from human-readable names to CVCL IDs"
+    )
+    
+    args = parser.parse_args()
     
     print("Converting generalization.toml file...")
-    print(f"Input: {input_path}")
-    print(f"Output: {output_path}")
+    print(f"Input: {args.input_path}")
+    print(f"Output: {args.output_path}")
+    print(f"Drug conversion: {'enabled' if args.enable_drug_conversion else 'disabled'}")
+    print(f"Cell conversion: {'enabled' if args.enable_cell_conversion else 'disabled'}")
     
-    convert_toml_file(input_path, output_path)
+    convert_toml_file(
+        args.input_path, 
+        args.output_path,
+        enable_drug_conversion=args.enable_drug_conversion,
+        enable_cell_conversion=args.enable_cell_conversion
+    )
     print("Conversion completed!")
 
 
