@@ -1,6 +1,6 @@
-state_path: "/tahoe/mosaicfm/datasets/tahoe100m_with_state_embeddings_parquet/*"
-mosaicfm_path: "/tahoe/mosaicfm/datasets/barotaxis/embeddings_tahoe_100m/*"
-token2hvg_path: "/tahoe/state_tahoe/token2hvg.parquet"
+state_path: "/tahoe/drive_3/ANALYSIS/analysis_190/Data/tahoe100m_with_state_embeddings_parquet/*"
+mosaicfm_path: "/tahoe/drive_3/ANALYSIS/analysis_190/Data/20250527.Tahoe.full_filtered.100M_with_embeddings/*"
+token2hvg_path: "/tahoe/drive_3/ANALYSIS/analysis_190/Data/token2hvg.parquet"
 out_dir: "/tahoe/drive_3/ANALYSIS/analysis_190/Data/state_input_merged"
 chunk_size: 200000
 target_sum: 1872 # Median library size for Tahoe-100M (pass_filter="full"), considering all genes

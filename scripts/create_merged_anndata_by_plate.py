@@ -69,14 +69,17 @@ def estimate_plate_memory(state_path: str, mosaicfm_path: str, plate_value: str)
 
 def process_plate_chunked(state_lf, mosaicfm_lf, plate_value: str, token_to_col_idx: Dict[int, int], 
                          gene_names: list, sample_to_dose: Dict[str, str], target_sum: float,
-                         chunk_size: int = 100000) -> ad.AnnData:
+                         sample_plate_dict: Dict[str, str], chunk_size: int = 100000) -> ad.AnnData:
     """Process a large plate in chunks with pre-allocated arrays to manage memory efficiently."""
     n_hvg_genes = len(gene_names)
     
     # Get filtered data for this plate once (more efficient)
     log.info(f"Filtering data for plate {plate_value}")
     plate_state_lf = state_lf.filter(pl.col('plate') == plate_value)
-    plate_mosaic_lf = mosaicfm_lf.filter(pl.col('plate') == plate_value)
+    
+    # Filter MosaicFM data by samples that belong to this plate
+    plate_samples = [sample for sample, plate in sample_plate_dict.items() if plate == plate_value]
+    plate_mosaic_lf = mosaicfm_lf.filter(pl.col('sample').is_in(plate_samples))
     
     # Get total rows for this plate
     plate_rows = plate_state_lf.select(pl.len()).collect().item()
@@ -169,13 +172,17 @@ def process_plate_chunked(state_lf, mosaicfm_lf, plate_value: str, token_to_col_
 
 
 def process_plate_whole(state_lf, mosaicfm_lf, plate_value: str, token_to_col_idx: Dict[int, int],
-                       gene_names: list, sample_to_dose: Dict[str, str], target_sum: float) -> ad.AnnData:
+                       gene_names: list, sample_to_dose: Dict[str, str], target_sum: float,
+                       sample_plate_dict: Dict[str, str]) -> ad.AnnData:
     """Process entire plate in memory (for smaller plates)."""
     n_hvg_genes = len(gene_names)
     
     log.info(f"Loading entire plate {plate_value} into memory")
     state_batch = state_lf.filter(pl.col('plate') == plate_value).collect()
-    mosaic_batch = mosaicfm_lf.filter(pl.col('plate') == plate_value).collect()
+    
+    # Filter MosaicFM data by samples that belong to this plate
+    plate_samples = [sample for sample, plate in sample_plate_dict.items() if plate == plate_value]
+    mosaic_batch = mosaicfm_lf.filter(pl.col('sample').is_in(plate_samples)).collect()
     
     plate_rows = len(state_batch)
     log.info(f"Processing plate {plate_value} ({plate_rows:,} cells)")
@@ -259,8 +266,15 @@ def main(cfg: DictConfig):
     log.info("Setting up lazy parquet readers...")
     with StringCache():
         state_lf = pl.scan_parquet(cfg.state_path)
+        
+        # Create sample-to-plate mapping since MosaicFM data doesn't have 'plate' column
+        log.info("Creating sample-to-plate mapping...")
+        sample_to_plate = state_lf.select(["sample", "plate"]).unique().collect()
+        sample_plate_dict = dict(zip(sample_to_plate["sample"], sample_to_plate["plate"]))
+        log.info(f"Created mapping for {len(sample_plate_dict)} samples across {len(plates)} plates")
+        
         mosaicfm_lf = pl.scan_parquet(cfg.mosaicfm_path).select([
-            "BARCODE_SUB_LIB_ID", "plate", "mosaicfm-70m-merged"
+            "BARCODE_SUB_LIB_ID", "sample", "mosaicfm-70m-merged"
         ])
         
         # Process each plate
@@ -278,13 +292,13 @@ def main(cfg: DictConfig):
                 log.info(f"Using chunked processing (memory: {memory_gb:.1f} GB)")
                 adata = process_plate_chunked(
                     state_lf, mosaicfm_lf, plate_value, token_to_col_idx, 
-                    gene_names, sample_to_dose, cfg.target_sum, cfg.get('chunk_size', 100000)
+                    gene_names, sample_to_dose, cfg.target_sum, sample_plate_dict, cfg.get('chunk_size', 100000)
                 )
             else:
                 log.info(f"Using whole-plate processing (memory: {memory_gb:.1f} GB)")
                 adata = process_plate_whole(
                     state_lf, mosaicfm_lf, plate_value, token_to_col_idx,
-                    gene_names, sample_to_dose, cfg.target_sum
+                    gene_names, sample_to_dose, cfg.target_sum, sample_plate_dict
                 )
             
             # Save plate
