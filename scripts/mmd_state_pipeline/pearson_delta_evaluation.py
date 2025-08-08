@@ -45,6 +45,10 @@ CONFIG = {
     
     # Evaluation parameters
     'min_cells_for_pseudobulk': 10,  # Minimum cells needed for reliable pseudobulk
+<<<<<<< HEAD
+    'min_tech_dup_cells': 20,  # Minimum cells needed for technical duplicate computation
+=======
+>>>>>>> origin/main
     'log_scale_inputs': False,  # Whether to apply log10(x+1) transformation to input values
     
     # Output
@@ -337,7 +341,11 @@ def compute_technical_duplicate_correlation(test_adata: sc.AnnData, dmso_adata: 
         return 0.0, 0, 0
 
 def compute_pearson_delta_correlation(true_deltas_df: pd.DataFrame, 
+<<<<<<< HEAD
+                                    pred_deltas_df: pd.DataFrame) -> Tuple[float, int, pd.DataFrame]:
+=======
                                     pred_deltas_df: pd.DataFrame) -> Tuple[float, int]:
+>>>>>>> origin/main
     """Compute Pearson correlation between true and predicted signed expression deltas (log fold changes)."""
     print("Computing Pearson Delta correlation...")
     
@@ -351,9 +359,16 @@ def compute_pearson_delta_correlation(true_deltas_df: pd.DataFrame,
     
     print(f"Found {len(common_perturbations)} common perturbations")
     
+<<<<<<< HEAD
+    # Collect all delta values for overall correlation AND compute per-comparison correlations
+    true_deltas_all = []
+    pred_deltas_all = []
+    per_comparison_results = []
+=======
     # Collect all delta values
     true_deltas_all = []
     pred_deltas_all = []
+>>>>>>> origin/main
     
     for _, row in common_perturbations.iterrows():
         drug_dose = row['drug_dose']
@@ -367,6 +382,52 @@ def compute_pearson_delta_correlation(true_deltas_df: pd.DataFrame,
         pred_mask = (pred_deltas_df['drug_dose'] == drug_dose) & (pred_deltas_df['cell_line'] == cell_line)
         pred_row = pred_deltas_df[pred_mask].iloc[0]
         
+<<<<<<< HEAD
+        # Get expression deltas for this comparison
+        true_deltas = true_row['expression_deltas']
+        pred_deltas = pred_row['expression_deltas']
+        
+        # Add to overall collection
+        true_deltas_all.extend(true_deltas)
+        pred_deltas_all.extend(pred_deltas)
+        
+        # Compute per-comparison correlation
+        valid_mask = ~(np.isnan(true_deltas) | np.isnan(pred_deltas))
+        true_clean = true_deltas[valid_mask]
+        pred_clean = pred_deltas[valid_mask]
+        
+        if len(true_clean) > 1:
+            try:
+                corr, p_val = pearsonr(true_clean, pred_clean)
+            except:
+                corr, p_val = np.nan, np.nan
+        else:
+            corr, p_val = np.nan, np.nan
+        
+        # Store per-comparison results
+        per_comparison_results.append({
+            'drug_dose': drug_dose,
+            'cell_line': cell_line,
+            'pearson_correlation': corr,
+            'p_value': p_val,
+            'n_genes': len(true_clean),
+            'n_total_genes': len(true_deltas),
+            'n_nan_genes': len(true_deltas) - len(true_clean),
+            'true_delta_mean': np.nanmean(true_deltas),
+            'true_delta_std': np.nanstd(true_deltas),
+            'pred_delta_mean': np.nanmean(pred_deltas),
+            'pred_delta_std': np.nanstd(pred_deltas),
+            'n_true_cells': true_row['n_pert_cells'],
+            'n_pred_cells': pred_row['n_pert_cells'],
+            'n_ctrl_cells': true_row['n_ctrl_cells']
+        })
+
+    # Convert to numpy arrays for overall correlation
+    true_deltas_all = np.array(true_deltas_all)
+    pred_deltas_all = np.array(pred_deltas_all)
+
+    print(f"Delta arrays: {len(true_deltas_all):,} values each")
+=======
         # Add all gene deltas to the collection
         true_deltas_all.extend(true_row['expression_deltas'])
         pred_deltas_all.extend(pred_row['expression_deltas'])
@@ -374,22 +435,52 @@ def compute_pearson_delta_correlation(true_deltas_df: pd.DataFrame,
     # Convert to numpy arrays for easier handling
     true_deltas_all = np.array(true_deltas_all)
     pred_deltas_all = np.array(pred_deltas_all)
+>>>>>>> origin/main
     
     # Check for NaN values
     true_nan_count = np.sum(np.isnan(true_deltas_all))
     pred_nan_count = np.sum(np.isnan(pred_deltas_all))
     
+<<<<<<< HEAD
+    print(f"True deltas NaN count: {true_nan_count:,}")
+    print(f"Pred deltas NaN count: {pred_nan_count:,}")
+    
+    # Remove NaN values for overall correlation
+=======
     print(f"Delta arrays: {len(true_deltas_all):,} values each")
     print(f"True deltas NaN count: {true_nan_count:,}")
     print(f"Pred deltas NaN count: {pred_nan_count:,}")
     
     # Remove NaN values
+>>>>>>> origin/main
     valid_mask = ~(np.isnan(true_deltas_all) | np.isnan(pred_deltas_all))
     true_deltas_clean = true_deltas_all[valid_mask]
     pred_deltas_clean = pred_deltas_all[valid_mask]
     
     print(f"Valid (non-NaN) values: {len(true_deltas_clean):,}")
     
+<<<<<<< HEAD
+    # Compute overall Pearson correlation
+    if len(true_deltas_clean) > 1:
+        correlation, p_value = pearsonr(true_deltas_clean, pred_deltas_clean)
+        print(f"✓ Overall Pearson Delta correlation: {correlation:.4f} (p={p_value:.2e})")
+    else:
+        print("⚠ No valid delta pairs found after NaN removal")
+        correlation = 0.0
+    
+    # Create per-comparison dataframe
+    per_comparison_df = pd.DataFrame(per_comparison_results)
+    
+    # Summary of per-comparison correlations
+    valid_comparisons = per_comparison_df[~per_comparison_df['pearson_correlation'].isna()]
+    if len(valid_comparisons) > 0:
+        print(f"✓ Per-comparison correlations: mean={valid_comparisons['pearson_correlation'].mean():.4f}, "
+              f"median={valid_comparisons['pearson_correlation'].median():.4f}, "
+              f"std={valid_comparisons['pearson_correlation'].std():.4f}")
+        print(f"  Valid comparisons: {len(valid_comparisons)}/{len(per_comparison_df)}")
+    
+    return correlation, len(true_deltas_clean), per_comparison_df
+=======
     # Compute Pearson correlation
     if len(true_deltas_clean) > 1:
         correlation, p_value = pearsonr(true_deltas_clean, pred_deltas_clean)
@@ -398,6 +489,7 @@ def compute_pearson_delta_correlation(true_deltas_df: pd.DataFrame,
     else:
         print("⚠ No valid delta pairs found after NaN removal")
         return 0.0, 0
+>>>>>>> origin/main
 
 def evaluate_pearson_delta(predicted_path: str, test_path: str, dmso_path: str):
     """Main evaluation function for Pearson Delta metric using three-file approach."""
@@ -459,7 +551,11 @@ def evaluate_pearson_delta(predicted_path: str, test_path: str, dmso_path: str):
     
     # Compute Pearson Delta correlation
     print("\nComputing Pearson Delta correlation...")
+<<<<<<< HEAD
+    correlation, n_comparisons, per_comparison_df = compute_pearson_delta_correlation(test_deltas, predicted_deltas)
+=======
     correlation, n_comparisons = compute_pearson_delta_correlation(test_deltas, predicted_deltas)
+>>>>>>> origin/main
     
     # Compute technical duplicate correlation
     print("\nComputing technical duplicate correlation...")
@@ -491,14 +587,26 @@ def evaluate_pearson_delta(predicted_path: str, test_path: str, dmso_path: str):
         'performance_ratio': correlation / tech_dup_correlation if tech_dup_correlation > 0 else 0
     }
     
+<<<<<<< HEAD
+    return results, per_comparison_df
+
+def save_results(results: dict, per_comparison_df: pd.DataFrame):
+    """Save evaluation results and per-comparison correlation data."""
+=======
     return results, predicted_deltas, test_deltas
 
 def save_results(results: dict, predicted_deltas: pd.DataFrame, test_deltas: pd.DataFrame):
     """Save evaluation results and data."""
+>>>>>>> origin/main
     print(f"\nSaving results...")
     
     CONFIG['output_dir'].mkdir(exist_ok=True)
     
+<<<<<<< HEAD
+    # Save per-comparison correlations
+    per_comparison_path = CONFIG['output_dir'] / "per_comparison_correlations.parquet"
+    per_comparison_df.to_parquet(per_comparison_path)
+=======
     # Save deltas (drop expression arrays but keep stats)
     predicted_summary = predicted_deltas.drop('expression_deltas', axis=1)
     test_summary = test_deltas.drop('expression_deltas', axis=1)
@@ -508,21 +616,53 @@ def save_results(results: dict, predicted_deltas: pd.DataFrame, test_deltas: pd.
     
     predicted_summary.to_parquet(predicted_summary_path)
     test_summary.to_parquet(test_summary_path)
+>>>>>>> origin/main
     
     # Save summary results (handle NaN values in JSON)
     summary_path = CONFIG['output_dir'] / CONFIG['summary_file']
     
+<<<<<<< HEAD
+    # Convert NaN to None and numpy types to Python types for JSON serialization
+    results_json = results.copy()
+    for key, value in results_json.items():
+        if isinstance(value, (np.floating, float)):
+            if np.isnan(value):
+                results_json[key] = None
+            else:
+                results_json[key] = float(value)
+        elif isinstance(value, (np.integer, int)):
+            results_json[key] = int(value)
+        elif isinstance(value, dict):
+            # Handle nested dictionaries
+            nested_dict = {}
+            for nested_key, nested_value in value.items():
+                if isinstance(nested_value, (np.floating, float)):
+                    if np.isnan(nested_value):
+                        nested_dict[nested_key] = None
+                    else:
+                        nested_dict[nested_key] = float(nested_value)
+                elif isinstance(nested_value, (np.integer, int)):
+                    nested_dict[nested_key] = int(nested_value)
+                else:
+                    nested_dict[nested_key] = nested_value
+            results_json[key] = nested_dict
+=======
     # Convert NaN to None for JSON serialization
     results_json = results.copy()
     for key, value in results_json.items():
         if isinstance(value, float) and np.isnan(value):
             results_json[key] = None
+>>>>>>> origin/main
     
     with open(summary_path, 'w') as f:
         json.dump(results_json, f, indent=2)
     
+<<<<<<< HEAD
+    print(f"✓ Per-comparison correlations saved to: {per_comparison_path}")
+=======
     print(f"✓ Predicted deltas summary saved to: {predicted_summary_path}")
     print(f"✓ Test deltas summary saved to: {test_summary_path}")
+>>>>>>> origin/main
     print(f"✓ Summary saved to: {summary_path}")
 
 def main():
@@ -562,10 +702,17 @@ def main():
             print("Evaluation failed - no valid perturbations found")
             return
         
+<<<<<<< HEAD
+        results, per_comparison_df = result
+        
+        # Save results
+        save_results(results, per_comparison_df)
+=======
         results, predicted_deltas, test_deltas = result
         
         # Save results
         save_results(results, predicted_deltas, test_deltas)
+>>>>>>> origin/main
         
         print(f"\n{'='*60}")
         print("PEARSON DELTA EVALUATION COMPLETE")
@@ -593,6 +740,35 @@ def main():
         print(f"✓ Features used: {results['n_features']:,}")
         print(f"✓ Embedding keys: {results['embedding_keys']}")
         
+<<<<<<< HEAD
+        # Per-comparison summary
+        valid_comparisons = per_comparison_df[~per_comparison_df['pearson_correlation'].isna()]
+        if len(valid_comparisons) > 0:
+            print(f"\n--- PER-COMPARISON SUMMARY ---")
+            print(f"Valid comparisons: {len(valid_comparisons)}/{len(per_comparison_df)}")
+            print(f"Correlation distribution:")
+            print(f"  Mean: {valid_comparisons['pearson_correlation'].mean():.4f}")
+            print(f"  Median: {valid_comparisons['pearson_correlation'].median():.4f}")
+            print(f"  Std: {valid_comparisons['pearson_correlation'].std():.4f}")
+            print(f"  Min: {valid_comparisons['pearson_correlation'].min():.4f}")
+            print(f"  Max: {valid_comparisons['pearson_correlation'].max():.4f}")
+            print(f"  25th percentile: {valid_comparisons['pearson_correlation'].quantile(0.25):.4f}")
+            print(f"  75th percentile: {valid_comparisons['pearson_correlation'].quantile(0.75):.4f}")
+            
+            # Count by performance ranges
+            excellent = (valid_comparisons['pearson_correlation'] >= 0.8).sum()
+            good = ((valid_comparisons['pearson_correlation'] >= 0.5) & (valid_comparisons['pearson_correlation'] < 0.8)).sum()
+            moderate = ((valid_comparisons['pearson_correlation'] >= 0.2) & (valid_comparisons['pearson_correlation'] < 0.5)).sum()
+            poor = (valid_comparisons['pearson_correlation'] < 0.2).sum()
+            
+            print(f"\nPerformance distribution:")
+            print(f"  Excellent (≥0.8): {excellent} ({100*excellent/len(valid_comparisons):.1f}%)")
+            print(f"  Good (0.5-0.8): {good} ({100*good/len(valid_comparisons):.1f}%)")
+            print(f"  Moderate (0.2-0.5): {moderate} ({100*moderate/len(valid_comparisons):.1f}%)")
+            print(f"  Poor (<0.2): {poor} ({100*poor/len(valid_comparisons):.1f}%)")
+        
+=======
+>>>>>>> origin/main
         # Interpretation guidance
         if results['n_tech_dup_combinations'] > 0:
             print(f"\n--- INTERPRETATION GUIDE ---")

@@ -1,0 +1,91 @@
+data:
+  name: PerturbationDataModule
+  kwargs:
+    toml_config_path: /large_storage/ctc/userspace/aadduri/datasets/tahoe_5_holdout/generalization.toml
+    embed_key: X_hvg
+    output_space: gene
+    pert_rep: onehot
+    basal_rep: sample
+    num_workers: 24
+    pin_memory: true
+    n_basal_samples: 1
+    basal_mapping_strategy: random
+    should_yield_control_cells: true
+    batch_col: sample
+    pert_col: drugname_drugconc
+    cell_type_key: cell_name
+    control_pert: DMSO_TF
+    map_controls: true
+    perturbation_features_file: null
+    store_raw_basal: false
+    int_counts: false
+  output_dir: null
+  debug: true
+model:
+  name: PertSets
+  checkpoint: null
+  device: cuda
+  kwargs:
+    cell_set_len: 256
+    blur: 0.05
+    hidden_dim: 1488
+    loss: energy
+    confidence_head: false
+    n_encoder_layers: 4
+    n_decoder_layers: 4
+    predict_residual: true
+    softplus: true
+    freeze_pert: false
+    transformer_decoder: false
+    finetune_vci_decoder: false
+    residual_decoder: false
+    decoder_loss_weight: 1.0
+    batch_encoder: false
+    nb_decoder: false
+    mask_attn: false
+    use_effect_gating_token: false
+    distributional_loss: energy
+    init_from: /large_storage/ctc/userspace/aadduri/preprint/tahoe_scaling_cs256/cs256/checkpoints/last.ckpt
+    transformer_backbone_key: llama
+    transformer_backbone_kwargs:
+      max_position_embeddings: 256
+      hidden_size: 1488
+      intermediate_size: 5952
+      num_hidden_layers: 6
+      num_attention_heads: 12
+      num_key_value_heads: 12
+      head_dim: 124
+      use_cache: false
+      attention_dropout: 0.0
+      hidden_dropout: 0.0
+      layer_norm_eps: 1.0e-06
+      pad_token_id: 0
+      bos_token_id: 1
+      eos_token_id: 2
+      tie_word_embeddings: false
+      rotary_dim: 0
+      use_rotary_embeddings: false
+training:
+  wandb_track: false
+  weight_decay: 0.0005
+  batch_size: 64
+  lr: 0.0001
+  max_steps: 10
+  train_seed: 42
+  val_freq: 100
+  ckpt_every_n_steps: 1
+  gradient_clip_val: 10
+  loss_fn: mse
+wandb:
+  entity: arcinstitute
+  project: vci1
+  local_wandb_dir: /large_storage/ctc/userspace/aadduri/wandb_dir/vci1
+  tags:
+  - tahoe_scaling
+name: cs256
+output_dir: /large_storage/ctc/userspace/aadduri/preprint/tahoe_fig2_release
+use_wandb: true
+overwrite: false
+return_adatas: false
+pred_adata_path: null
+true_adata_path: null
