@@ -298,3 +298,292 @@ python pearson_delta_evaluation.py --predicted ../../Data/state_input_tahoe_hvg_
 ```bash
 python pearson_delta_evaluation.py --log-scale-inputs --predicted ../../Data/state_input_tahoe_hvg_unlogged/20250711.tahoe.hvg.unlogged_tahoe5holdout_split_outputs/dmso_controls_predicted_all_perturbations.h5ad --test ../../Data/state_input_tahoe_hvg_unlogged/20250711.tahoe.hvg.unlogged_tahoe5holdout_split_outputs/test_subset.h5ad --dmso-controls ../../Data/state_input_tahoe_hvg_unlogged/20250711.tahoe.hvg.unlogged_tahoe5holdout_split_outputs/dmso_controls_expanded_for_inference.h5ad --output-dir ../../Data/state_input_tahoe_hvg_unlogged/20250711.tahoe.hvg.unlogged_tahoe5holdout_split_outputs/pearson_delta_results_logged
 ```
+
+
+### 20250804
+```bash
+python /tahoe/drive_3/ANALYSIS/analysis_190/Code/state-tahoe-fork/scripts/mmd_state_pipeline/pearson_delta_evaluation.py \
+--predicted /tahoe/drive_3/ANALYSIS/analysis_190/Data/state_input_tahoe_hvg_unlogged/20250711.tahoe.hvg.unlogged_tahoe5holdout_split_outputs/dmso_controls_predicted_all_perturbations.h5ad \
+--test /tahoe/drive_3/ANALYSIS/analysis_190/Data/state_input_tahoe_hvg_unlogged/20250711.tahoe.hvg.unlogged_tahoe5holdout_split_outputs/test_subset.h5ad \
+--dmso-controls /tahoe/drive_3/ANALYSIS/analysis_190/Data/state_input_tahoe_hvg_unlogged/20250711.tahoe.hvg.unlogged_tahoe5holdout_split_outputs/dmso_controls_expanded_for_inference.h5ad \
+--output-dir /tahoe/drive_3/ANALYSIS/analysis_190/Data/state_input_tahoe_hvg_unlogged/20250711.tahoe.hvg.unlogged_tahoe5holdout_split_outputs/pearson_delta_results
+```
+
+
+### 20250804
+```bash
+python /tahoe/drive_3/ANALYSIS/analysis_190/Code/state-tahoe-fork/scripts/mmd_state_pipeline/subset_h5ad.py \
+/tahoe/drive_3/ANALYSIS/analysis_190/Data/state_input_tahoe_hvg_unlogged/20250711.tahoe.hvg.unlogged_tahoe5holdout_split_outputs/test_subset.h5ad
+```
+
+### 20250804
+```bash
+python /tahoe/drive_3/ANALYSIS/analysis_190/Code/state-tahoe-fork/scripts/mmd_state_pipeline/subset_h5ad.py \
+/tahoe/drive_3/ANALYSIS/analysis_190/Data/state_input_tahoe_hvg_unlogged/20250711.tahoe.hvg.unlogged_tahoe5holdout_split_outputs/dmso_controls_predicted_all_perturbations.h5ad
+```
+
+
+### 20250805
+```bash
+cd /tahoe/drive_3/ANALYSIS/analysis_190/Data/state_input_tahoe_hvg_unlogged/20250711.tahoe.hvg.unlogged_tahoe5holdout_split_outputs/single_condition
+python /tahoe/drive_3/ANALYSIS/analysis_190/Code/cell-eval/pearson_delta_only.py \
+--adata-real test_subset.h5ad \
+--adata-pred dmso_controls_predicted_all_perturbations.h5ad \
+--pert-col drug_dose \
+--celltype-col cell_line \
+--control-pert DMSO_TF_00 \
+--embed-key-real X_hvg \
+--embed-key-pred model_preds \
+--allow-discrete \
+--outdir cell_eval_pearson_delta_results
+```
+
+```bash
+python /tahoe/drive_3/ANALYSIS/analysis_190/Code/state-tahoe-fork/scripts/mmd_state_pipeline/pearson_delta_evaluation.py \
+--predicted dmso_controls_predicted_all_perturbations.h5ad \
+--pred-key model_preds \
+--test test_subset.h5ad \
+--test-key X_hvg \
+--dmso-controls dmso_controls_predicted_all_perturbations.h5ad \
+--dmso-key X_hvg
+```
+
+```bash
+state tx infer \
+--checkpoint /tahoe/drive_3/ANALYSIS/analysis_190/Code/train_state_tx/pretrained/ST-Tahoe/checkpoints/final.ckpt \
+--adata treat_to_predict_rescaled_hvg.h5ad \
+--embed_key X_hvg \
+--pert_col drug_dose \
+--output treat_is_predict_rescaled_hvg.h5ad \
+--model_dir /tahoe/drive_3/ANALYSIS/analysis_190/Code/train_state_tx/pretrained/ST-Tahoe \
+--celltype_col cell_line
+```
+
+```bash
+python /tahoe/drive_3/ANALYSIS/analysis_190/Code/state-tahoe-fork/scripts/mmd_state_pipeline/pearson_delta_evaluation.py \
+--predicted treat_is_predict_rescaled_hvg.h5ad \
+--pred-key model_preds \
+--test treat_to_predict_rescaled_hvg.h5ad \
+--test-key X_hvg \
+--dmso-controls treat_is_predict_rescaled_hvg.h5ad \
+--dmso-key X_hvg
+```
+
+```bash
+python /tahoe/drive_3/ANALYSIS/analysis_190/Code/cell-eval/pearson_delta_only.py \
+--adata-real treat_to_predict_rescaled_hvg.h5ad \
+--adata-pred treat_is_predict_rescaled_hvg.h5ad \
+--pert-col drug_dose \
+--celltype-col cell_line \
+--control-pert DMSO_TF_00 \
+--embed-key-real X_hvg \
+--embed-key-pred model_preds \
+--allow-discrete \
+--outdir cell_eval_pearson_delta_results
+```
+
+
+
+
+# 20250805
+# Redo inference while explicitly specifying cell type information
+```bash
+state tx infer \
+--checkpoint /tahoe/drive_3/ANALYSIS/analysis_190/Code/train_state_tx/experiments/tahoe_state_tx_20250729_201816_nonlog_hvg_full/checkpoints/final.ckpt \
+--model_dir /tahoe/drive_3/ANALYSIS/analysis_190/Code/train_state_tx/experiments/tahoe_state_tx_20250729_201816_nonlog_hvg_full \
+--adata /tahoe/drive_3/ANALYSIS/analysis_190/Data/state_input_tahoe_hvg_unlogged/20250711.tahoe.hvg.unlogged_tahoe5holdout_split_outputs/dmso_controls_expanded_for_inference.h5ad \
+--embed_key X_hvg \
+--pert_col drug_dose \
+--celltype_col cell_line \
+--output /tahoe/drive_3/ANALYSIS/analysis_190/Data/state_input_tahoe_hvg_unlogged/20250711.tahoe.hvg.unlogged_tahoe5holdout_split_outputs/dmso_controls_predicted_all_perturbations.h5ad
+```
+
+```bash
+python /tahoe/drive_3/ANALYSIS/analysis_190/mmd_state_pipeline/filter_h5ad_perturbations.py \
+--predicted /tahoe/drive_3/ANALYSIS/analysis_190/Data/state_input_tahoe_hvg_unlogged/20250711.tahoe.hvg.unlogged_tahoe5holdout_split_outputs/dmso_controls_predicted_all_perturbations.h5ad \
+--reference /tahoe/drive_3/ANALYSIS/analysis_190/Data/state_input_tahoe_hvg_unlogged/20250711.tahoe.hvg.unlogged_tahoe5holdout_split_outputs/test_subset.h5ad \
+--output /tahoe/drive_3/ANALYSIS/analysis_190/Data/state_input_tahoe_hvg_unlogged/20250711.tahoe.hvg.unlogged_tahoe5holdout_split_outputs/dmso_controls_predicted_filtered.h5ad
+```
+
+```bash
+python /tahoe/drive_3/ANALYSIS/analysis_190/Code/cell-eval/pearson_delta_only.py \
+--adata-pred /tahoe/drive_3/ANALYSIS/analysis_190/Data/state_input_tahoe_hvg_unlogged/20250711.tahoe.hvg.unlogged_tahoe5holdout_split_outputs/dmso_controls_predicted_all_perturbations.h5ad \
+--adata-real /tahoe/drive_3/ANALYSIS/analysis_190/Data/state_input_tahoe_hvg_unlogged/20250711.tahoe.hvg.unlogged_tahoe5holdout_split_outputs/test_subset.h5ad \
+--control-pert DMSO_TF_00 \
+--pert-col drug_dose \
+--celltype-col cell_line \
+--embed-key-real X_hvg \
+--embed-key-pred model_preds \
+--allow-discrete \
+--outdir /tahoe/drive_3/ANALYSIS/analysis_190/Data/state_input_tahoe_hvg_unlogged/20250711.tahoe.hvg.unlogged_tahoe5holdout_split_outputs/pearson-delta-only-results
+```
+
+```bash
+python /tahoe/drive_3/ANALYSIS/analysis_190/Code/state-tahoe-fork/scripts/mmd_state_pipeline/pearson_delta_evaluation.py \
+--predicted /tahoe/drive_3/ANALYSIS/analysis_190/Data/state_input_tahoe_hvg_unlogged/20250711.tahoe.hvg.unlogged_tahoe5holdout_split_outputs/dmso_controls_predicted_all_perturbations.h5ad \
+--pred-key model_preds \
+--test /tahoe/drive_3/ANALYSIS/analysis_190/Data/state_input_tahoe_hvg_unlogged/20250711.tahoe.hvg.unlogged_tahoe5holdout_split_outputs/test_subset.h5ad \
+--test-key X_hvg \
+--dmso-controls /tahoe/drive_3/ANALYSIS/analysis_190/Data/state_input_tahoe_hvg_unlogged/20250711.tahoe.hvg.unlogged_tahoe5holdout_split_outputs/dmso_controls_expanded_for_inference.h5ad \
+--dmso-key X_hvg
+```
+
+```bash
+python /tahoe/drive_3/ANALYSIS/analysis_190/Code/state-tahoe-fork/scripts/mmd_state_pipeline/evaluate_transport_mmd_h5ad_test.py \
+--test-dataset /tahoe/drive_3/ANALYSIS/analysis_190/Data/state_input_tahoe_hvg_unlogged/20250711.tahoe.hvg.unlogged_tahoe5holdout_split_outputs/test_subset.h5ad \
+--transported-data /tahoe/drive_3/ANALYSIS/analysis_190/Data/state_input_tahoe_hvg_unlogged/20250711.tahoe.hvg.unlogged_tahoe5holdout_split_outputs/dmso_controls_predicted_all_perturbations.h5ad \
+--dmso-controls /tahoe/drive_3/ANALYSIS/analysis_190/Data/state_input_tahoe_hvg_unlogged/20250711.tahoe.hvg.unlogged_tahoe5holdout_split_outputs/dmso_controls.h5ad \
+--embedding-key X_hvg \
+--output-dir /tahoe/drive_3/ANALYSIS/analysis_190/Data/state_input_tahoe_hvg_unlogged/20250711.tahoe.hvg.unlogged_tahoe5holdout_split_outputs/mmd_evaluation_results
+```
+
+
+
+
+
+
+# 20250805
+```python
+adata.obsm['X_hvg'] = adata.obsm['X_hvg'] * 1872.0 / 1e4
+```
+# Because Pearson(x, c * y) = Pearson(x, y), don't bother with test data
+
+```bash
+python /tahoe/drive_3/ANALYSIS/analysis_190/Code/state-tahoe-fork/scripts/mmd_state_pipeline/expand_dmso_for_inference.py \
+/tahoe/drive_3/ANALYSIS/analysis_190/Data/state_input_tahoe_hvg_unlogged/20250711.tahoe.hvg.unlogged_tahoe5holdout_split_output_pretrained/ \
+--split-file /tahoe/drive_3/ANALYSIS/analysis_190/Code/train_state_tx/tahoe_5_holdout_generalization_split_assignments.parquet \
+--embedding-key X_hvg
+```
+
+```bash
+state tx infer \
+--checkpoint /tahoe/drive_3/ANALYSIS/analysis_190/Code/train_state_tx/pretrained/ST-Tahoe/checkpoints/final.ckpt \
+--adata /tahoe/drive_3/ANALYSIS/analysis_190/Data/state_input_tahoe_hvg_unlogged/20250711.tahoe.hvg.unlogged_tahoe5holdout_split_output_pretrained/dmso_controls_expanded_for_inference.h5ad \
+--embed_key X_hvg \
+--pert_col drug_dose \
+--output /tahoe/drive_3/ANALYSIS/analysis_190/Data/state_input_tahoe_hvg_unlogged/20250711.tahoe.hvg.unlogged_tahoe5holdout_split_output_pretrained/dmso_controls_predicted_all_perturbations.h5ad \
+--model_dir /tahoe/drive_3/ANALYSIS/analysis_190/Code/train_state_tx/pretrained/ST-Tahoe \
+--celltype_col cell_line
+```
+
+```bash
+python /tahoe/drive_3/ANALYSIS/analysis_190/Code/cell-eval/pearson_delta_only.py \
+--adata-pred /tahoe/drive_3/ANALYSIS/analysis_190/Data/state_input_tahoe_hvg_unlogged/20250711.tahoe.hvg.unlogged_tahoe5holdout_split_output_pretrained/dmso_controls_predicted_all_perturbations.h5ad \
+--adata-real /tahoe/drive_3/ANALYSIS/analysis_190/Data/state_input_tahoe_hvg_unlogged/20250711.tahoe.hvg.unlogged_tahoe5holdout_split_output_pretrained/test_subset.h5ad \
+--control-pert DMSO_TF_00 \
+--pert-col drug_dose \
+--celltype-col cell_line \
+--embed-key-real X_hvg \
+--embed-key-pred model_preds \
+--allow-discrete \
+--outdir /tahoe/drive_3/ANALYSIS/analysis_190/Data/state_input_tahoe_hvg_unlogged/20250711.tahoe.hvg.unlogged_tahoe5holdout_split_output_pretrained/pearson-delta-only-results
+```
+
+
+
+
+
+
+
+# 20250806
+# Is the pretrained checkpoint out of date?
+```bash
+cd /tahoe/drive_3/ANALYSIS/analysis_190/Code/train_state_tx/pretrained/ST-Tahoe/checkpoints
+wget https://huggingface.co/arcinstitute/ST-Tahoe/resolve/main/final.ckpt
+sha256sum final.20250723.ckpt final.ckpt
+5ce0f8f8368fd4c21f8d8004366eba57a9a9a1f2ab878848ad065746fc9581c2  final.20250723.ckpt
+5ce0f8f8368fd4c21f8d8004366eba57a9a9a1f2ab878848ad065746fc9581c2  final.ckpt
+```
+
+```bash
+uv tool upgrade arc-state
+```
+
+```bash
+state tx infer \
+--checkpoint /tahoe/drive_3/ANALYSIS/analysis_190/Code/train_state_tx/pretrained/ST-Tahoe/checkpoints/final.ckpt \
+--adata /tahoe/drive_3/ANALYSIS/analysis_190/Data/state_input_tahoe_hvg_unlogged/20250711.tahoe.hvg.unlogged_tahoe5holdout_split_output_pretrained/dmso_controls_expanded_for_inference.h5ad \
+--embed_key X_hvg \
+--pert_col drug_dose \
+--output /tahoe/drive_3/ANALYSIS/analysis_190/Data/state_input_tahoe_hvg_unlogged/20250711.tahoe.hvg.unlogged_tahoe5holdout_split_output_pretrained/dmso_controls_predicted_all_perturbations.h5ad \
+--model_dir /tahoe/drive_3/ANALYSIS/analysis_190/Code/train_state_tx/pretrained/ST-Tahoe \
+--celltype_col cell_line
+```
+
+```bash
+python /tahoe/drive_3/ANALYSIS/analysis_190/Code/cell-eval/pearson_delta_only.py \
+--adata-pred /tahoe/drive_3/ANALYSIS/analysis_190/Data/state_input_tahoe_hvg_unlogged/20250711.tahoe.hvg.unlogged_tahoe5holdout_split_output_pretrained/dmso_controls_predicted_all_perturbations.h5ad \
+--adata-real /tahoe/drive_3/ANALYSIS/analysis_190/Data/state_input_tahoe_hvg_unlogged/20250711.tahoe.hvg.unlogged_tahoe5holdout_split_output_pretrained/test_subset.h5ad \
+--control-pert DMSO_TF_00 \
+--pert-col drug_dose \
+--celltype-col cell_line \
+--embed-key-real X_hvg \
+--embed-key-pred model_preds \
+--allow-discrete \
+--outdir /tahoe/drive_3/ANALYSIS/analysis_190/Data/state_input_tahoe_hvg_unlogged/20250711.tahoe.hvg.unlogged_tahoe5holdout_split_output_pretrained/pearson-delta-only-results
+```
+
+Though the paper says that Deltas are defined by |p - c| (whcih seems weird),
+in the actual code the use p - c, so Deltas can be negative: https://github.com/ArcInstitute/cell-eval/blob/main/src/cell_eval/metrics/_anndata.py#L211
+
+
+
+
+
+
+
+
+
+# 20250806
+# Let's try to get the full cell-eval suite working?
+
+```bash
+python /tahoe/drive_3/ANALYSIS/analysis_190/Code/state-tahoe-fork/scripts/mmd_state_pipeline/filter_h5ad_perturbations.py
+--predicted /tahoe/drive_3/ANALYSIS/analysis_190/Data/state_input_tahoe_hvg_unlogged/20250711.tahoe.hvg.unlogged_tahoe5holdout_split_outputs/dmso_controls_predicted_all_perturbations.h5ad
+--reference /tahoe/drive_3/ANALYSIS/analysis_190/Data/state_input_tahoe_hvg_unlogged/20250711.tahoe.hvg.unlogged_tahoe5holdout_split_outputs/test_subset.h5ad
+--output /tahoe/drive_3/ANALYSIS/analysis_190/Data/state_input_tahoe_hvg_unlogged/20250711.tahoe.hvg.unlogged_tahoe5holdout_split_outputs/dmso_controls_predicted_filtered.h5ad
+```
+
+```bash
+cell-eval run \
+--adata-pred /tahoe/drive_3/ANALYSIS/analysis_190/Data/state_input_tahoe_hvg_unlogged/20250711.tahoe.hvg.unlogged_tahoe5holdout_split_outputs/dmso_controls_predicted_filtered.h5ad \
+--adata-real /tahoe/drive_3/ANALYSIS/analysis_190/Data/state_input_tahoe_hvg_unlogged/20250711.tahoe.hvg.unlogged_tahoe5holdout_split_outputs/test_subset.h5ad \
+--control-pert DMSO_TF_00 \
+--pert-col drug_dose \
+--celltype-col cell_line \
+--embed-key X_hvg \
+--allow-discrete \
+--profile minimal \
+--outdir /tahoe/drive_3/ANALYSIS/analysis_190/Data/state_input_tahoe_hvg_unlogged/20250711.tahoe.hvg.unlogged_tahoe5holdout_split_outputs/cell-eval-outdir \
+--num-threads 12
+```
+
+
+
+
+
+
+
+# 20250807
+```bash
+state tx predict \
+--output_dir ST-Tahoe \
+--checkpoint final.ckpt \
+--profile minimal
+```
+
+```bash
+python /tahoe/drive_3/ANALYSIS/analysis_190/Code/cell-eval/pearson_delta_only.py \
+--adata-pred adata_pred.h5ad \
+--adata-real adata_real.h5ad \
+--control-pert DMSO_TF_00 \
+--pert-col drug_dose \
+--celltype-col cell_line_id \
+--embed-key-real X_hvg \
+--embed-key-pred X_hvg \
+--allow-discrete \
+--outdir ./pearson-delta-only-results
+```
+
+
+
