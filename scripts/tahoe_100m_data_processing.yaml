@@ -1,0 +1,8 @@
+state_path: "/tahoe/mosaicfm/datasets/tahoe100m_with_state_embeddings_parquet/*"
+mosaicfm_path: "/tahoe/mosaicfm/datasets/barotaxis/embeddings_tahoe_100m/*"
+token2hvg_path: "/tahoe/state_tahoe/token2hvg.parquet"
+out_dir: "/tahoe/state_tahoe/h5ad_chunks"
+chunk_size: 200000
+target_sum: 1872 # Median library size for Tahoe-100M (pass_filter="full"), considering all genes
+batch_size: 200000
+world_size: 8
