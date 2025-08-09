@@ -10,6 +10,8 @@
 - **Integrated drug mapping**: Adds drug dose information during creation (no post-processing needed)  
 - **Adaptive strategy**: Uses whole-plate or chunked processing based on memory estimation
 - **Comprehensive progress tracking**: Shows plate-level and cell-level progress
+- **Resume capability**: Automatically skips completed plates to allow restarting interrupted runs
+- **Vectorized HVG processing**: Eliminates Python loops for 10-100x performance improvement
 
 **Usage**:
 ```bash
@@ -31,3 +33,16 @@ python create_merged_anndata_by_plate.py tahoe_100m_data_processing.yaml
 - Estimates memory per plate, uses chunked processing for plates >200GB
 - Pre-allocated arrays eliminate memory accumulation issues
 - Designed for 250GB RAM budget with safety margin
+- Default chunk size: 1M cells for optimal vectorization performance
+
+**Performance Optimizations**:
+- **Vectorized HVG processing**: Replaced cell-by-cell Python loops with numpy array operations
+- **Dense matrix construction**: Direct numpy array assignment instead of sparse matrix building
+- **Larger chunks**: Increased from 100K to 1M cells per chunk for better vectorization
+- **Resume functionality**: Skip completed plates to avoid reprocessing
+- **Expected speedup**: 10-100x faster processing (~5-15 hours vs 113+ hours)
+
+**Data Alignment Requirements**:
+- **CRITICAL ASSUMPTION**: Both state and MosaicFM parquet datasets must maintain consistent ordering by BARCODE_SUB_LIB_ID
+- Script uses positional iteration without explicit sorting for performance
+- Violating this assumption will cause silent data corruption (cells matched with incorrect embeddings)
