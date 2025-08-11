@@ -10,11 +10,12 @@ explicit sorting, relying on this consistent ordering for proper data alignment.
 If the source datasets do not maintain this ordering consistency, the script will produce
 corrupted results where cells are matched with incorrect embeddings.
 """
+import argparse
 import logging
 import sys
 import time
 from pathlib import Path
-from typing import Dict, Tuple
+from typing import Dict, Tuple, Optional
 
 import anndata as ad
 import numpy as np
@@ -34,6 +35,152 @@ logging.basicConfig(
 )
 
 
+# === CLI Argument Parsing ===
+def parse_args():
+    """Parse command line arguments for plate processing."""
+    parser = argparse.ArgumentParser(
+        description='Process Tahoe-100M data by plate with real-time performance monitoring',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog='''
+Examples:
+  # Process all plates (default behavior)
+  python create_merged_anndata_by_plate.py config.yaml
+  
+  # List all available plates
+  python create_merged_anndata_by_plate.py config.yaml --list-plates
+  
+  # Process a specific plate
+  python create_merged_anndata_by_plate.py config.yaml --plate plate11
+  
+  # Parallel processing across machines
+  python create_merged_anndata_by_plate.py config.yaml --plate plate11 &  # Machine 1
+  python create_merged_anndata_by_plate.py config.yaml --plate plate12 &  # Machine 2
+        '''
+    )
+    
+    parser.add_argument('config_file', 
+                       help='Path to YAML configuration file')
+    parser.add_argument('--plate', 
+                       type=str, 
+                       help='Process only the specified plate (e.g., "plate11"). Enables parallel processing across machines.')
+    parser.add_argument('--list-plates', 
+                       action='store_true', 
+                       help='List all available plates and exit without processing')
+    
+    return parser.parse_args()
+
+
+# === Real-Time Performance Tracking ===
+class PlatePerformanceTracker:
+    """Real-time performance monitoring for long-running plate processing."""
+    
+    def __init__(self, total_cells: int, plate_name: str):
+        self.total_cells = total_cells
+        self.plate_name = plate_name
+        self.timings = {
+            'data_loading': 0.0,
+            'gene_processing': 0.0,
+            'matrix_assignment': 0.0,
+            'obs_building': 0.0
+        }
+        self.processed_cells = 0
+        self.start_time = time.time()
+        self.last_update_time = self.start_time
+        self.last_update_cells = 0
+        
+        log.info(f"🚀 Starting performance tracking for plate {plate_name} ({total_cells:,} cells)")
+    
+    def update_timing(self, component: str, duration: float, cells_processed: int = 0):
+        """Update timing for a specific component."""
+        self.timings[component] += duration
+        self.processed_cells += cells_processed
+        
+        # Log progress every 50K cells
+        if self.processed_cells > 0 and self.processed_cells % 50000 == 0:
+            self.log_current_stats()
+    
+    def log_current_stats(self):
+        """Log current performance statistics and projections."""
+        current_time = time.time()
+        total_duration = current_time - self.start_time
+        total_component_time = sum(self.timings.values())
+        
+        if total_component_time > 0 and total_duration > 0:
+            # Calculate percentages
+            percentages = {k: v/total_component_time*100 for k, v in self.timings.items()}
+            
+            # Calculate rates and ETA
+            overall_rate = self.processed_cells / total_duration
+            remaining_cells = self.total_cells - self.processed_cells
+            eta_seconds = remaining_cells / overall_rate if overall_rate > 0 else 0
+            eta_hours = eta_seconds / 3600
+            
+            # Calculate recent rate (since last update)
+            recent_cells = self.processed_cells - self.last_update_cells
+            recent_duration = current_time - self.last_update_time
+            recent_rate = recent_cells / recent_duration if recent_duration > 0 else 0
+            
+            # Progress info
+            progress_pct = self.processed_cells / self.total_cells * 100
+            log.info(f"📊 Plate {self.plate_name} Progress: {self.processed_cells:,}/{self.total_cells:,} cells ({progress_pct:.1f}%)")
+            
+            # Performance breakdown
+            log.info(f"⚡ Performance: Gene={percentages['gene_processing']:.1f}%, "
+                    f"Data={percentages['data_loading']:.1f}%, "
+                    f"Matrix={percentages['matrix_assignment']:.1f}%, "
+                    f"Obs={percentages['obs_building']:.1f}%")
+            
+            # Rate and ETA info
+            log.info(f"🏃 Rate: {overall_rate:.0f} cells/sec (recent: {recent_rate:.0f}), ETA: {eta_hours:.1f} hours")
+            
+            # Performance warnings
+            self.check_performance_alerts(percentages, overall_rate)
+            
+            # Update tracking
+            self.last_update_time = current_time
+            self.last_update_cells = self.processed_cells
+    
+    def check_performance_alerts(self, percentages: Dict[str, float], rate: float):
+        """Check for performance issues and log warnings."""
+        # Alert if gene processing is taking >70% (indicates inefficiency)
+        if percentages['gene_processing'] > 70:
+            log.warning("⚠️  Gene processing taking >70% of time - optimization needed!")
+        
+        # Alert for very slow processing
+        if rate < 500:
+            log.warning(f"⚠️  Processing rate ({rate:.0f} cells/sec) is very slow - check system resources!")
+        
+        # Alert for extremely long ETA
+        remaining_cells = self.total_cells - self.processed_cells
+        eta_hours = (remaining_cells / rate / 3600) if rate > 0 else float('inf')
+        if eta_hours > 24:
+            log.warning(f"⚠️  ETA ({eta_hours:.1f} hours) exceeds 24 hours - consider optimization!")
+    
+    def finalize(self) -> Dict[str, float]:
+        """Finalize tracking and return summary statistics."""
+        total_duration = time.time() - self.start_time
+        total_component_time = sum(self.timings.values())
+        
+        if total_component_time > 0:
+            percentages = {k: v/total_component_time*100 for k, v in self.timings.items()}
+            overall_rate = self.processed_cells / total_duration
+            
+            log.info(f"✅ Plate {self.plate_name} completed: {self.processed_cells:,} cells in {total_duration/3600:.2f} hours")
+            log.info(f"📈 Final breakdown: Gene={percentages['gene_processing']:.1f}%, "
+                    f"Data={percentages['data_loading']:.1f}%, "
+                    f"Matrix={percentages['matrix_assignment']:.1f}%, "
+                    f"Obs={percentages['obs_building']:.1f}%")
+            log.info(f"🎯 Average rate: {overall_rate:.0f} cells/sec")
+            
+            return {
+                'total_duration_hours': total_duration / 3600,
+                'cells_per_second': overall_rate,
+                **percentages
+            }
+        
+        return {}
+
+
 def load_hvg_mapping(token2hvg_path: str) -> Tuple[Dict[int, int], list]:
     """Load HVG token to column index mapping and gene names."""
     log.info(f"Loading HVG mapping from: {token2hvg_path}")
@@ -41,6 +188,7 @@ def load_hvg_mapping(token2hvg_path: str) -> Tuple[Dict[int, int], list]:
     df = df.sort_values('token_id').reset_index(drop=True)
     token_to_col_idx = {tid: i for i, tid in enumerate(df['token_id'])}
     gene_names = df['gene_symbol'].tolist()
+    
     log.info(f"Loaded {len(token_to_col_idx)} HVG genes")
     return token_to_col_idx, gene_names
 
@@ -80,9 +228,10 @@ def discover_plates(state_path: str) -> list:
     return plates
 
 
-def process_chunk_vectorized(state_data, mosaic_data, token_to_col_idx: Dict[int, int], 
-                            gene_names: list, sample_to_dose: Dict[str, str], target_sum: float) -> Tuple[np.ndarray, np.ndarray, np.ndarray, list]:
-    """Vectorized processing of chunk data for efficient HVG matrix construction."""
+def process_chunk_with_monitoring(state_data, mosaic_data, token_to_col_idx: Dict[int, int], 
+                                 gene_names: list, sample_to_dose: Dict[str, str], target_sum: float,
+                                 tracker: PlatePerformanceTracker) -> Tuple[np.ndarray, np.ndarray, np.ndarray, list]:
+    """Simple, fast processing with real-time performance monitoring (based on original fast script)."""
     n_hvg_genes = len(gene_names)
     chunk_size = len(state_data)
     
@@ -92,64 +241,55 @@ def process_chunk_vectorized(state_data, mosaic_data, token_to_col_idx: Dict[int
     state_matrix = np.zeros((chunk_size, 2048), dtype=np.float32)
     obs_data = []
     
-    # Extract data in bulk
+    # Simple, fast processing with detailed timing (like original script)
     for i, (s_row, m_row) in enumerate(zip(
         state_data.iter_rows(named=True), mosaic_data.iter_rows(named=True)
     )):
-        # Data alignment validation
+        # Data loading timing
+        t0 = time.time()
         assert s_row['BARCODE_SUB_LIB_ID'] == m_row['BARCODE_SUB_LIB_ID'], \
             f"Mismatch: {s_row['BARCODE_SUB_LIB_ID']} != {m_row['BARCODE_SUB_LIB_ID']}"
         
-        # Process gene expression - vectorized approach
-        genes = np.array(s_row['genes'])
-        exprs = np.array(s_row['expressions'])
-        
-        # Handle negative first values
+        genes = s_row['genes']
+        exprs = s_row['expressions']
         if len(exprs) > 0 and exprs[0] < 0:
             genes, exprs = genes[1:], exprs[1:]
         
-        lib_size = exprs.sum() if len(exprs) > 0 else 0
+        tracker.update_timing('data_loading', time.time() - t0, 0)
         
-        # Vectorized gene mapping and assignment
-        if len(genes) > 0 and lib_size > 0:
-            # Find valid genes that exist in HVG mapping
-            valid_genes = []
-            valid_exprs = []
-            valid_indices = []
-            
-            for j, gene in enumerate(genes):
-                if gene in token_to_col_idx:
-                    col_idx = token_to_col_idx[gene]
-                    # SAFETY CHECK: Ensure index is within bounds
-                    if col_idx < n_hvg_genes:
-                        valid_genes.append(gene)
-                        valid_exprs.append(exprs[j])
-                        valid_indices.append(col_idx)
-                    else:
-                        log.warning(f"Gene {gene} index {col_idx} exceeds HVG matrix bounds {n_hvg_genes}")
-            
-            if valid_indices:
-                # Assign expressions to HVG matrix
-                valid_exprs = np.array(valid_exprs, dtype=np.float32)
-                hvg_matrix[i, valid_indices] = valid_exprs * (target_sum / lib_size)
+        # Gene processing timing (identical to fast original approach)
+        t1 = time.time()
+        lib_size = sum(exprs) if len(exprs) > 0 else 0
+        hvg_vec = np.zeros(n_hvg_genes, dtype=np.float32)
         
-        # Build obs row with drug dose info
-        obs_row = {k: s_row[k] for k in s_row.keys() if k not in ['genes', 'expressions', 'state_embeddings']}
-        obs_row['library_size'] = lib_size
+        # Simple, fast gene processing (identical to original)
+        for gene, expr in zip(genes, exprs):
+            if gene in token_to_col_idx:
+                hvg_vec[token_to_col_idx[gene]] = expr
         
-        # Add drug dose mapping with logging for missing samples
-        sample_id = s_row.get('sample')
-        drug_dose = sample_to_dose.get(sample_id)
-        if drug_dose is None and sample_id is not None:
-            log.debug(f"No drug dose mapping found for sample: {sample_id}")
-        obs_row['drugname_drugconc'] = drug_dose
+        if lib_size > 0:
+            hvg_vec *= target_sum / lib_size
         
-        # Assign to matrices
+        tracker.update_timing('gene_processing', time.time() - t1, 1)
+        
+        # Matrix assignment timing
+        t2 = time.time()
+        hvg_matrix[i] = hvg_vec
         mosaicfm_matrix[i] = np.array(m_row['mosaicfm-70m-merged'], dtype=np.float32)
         state_matrix[i] = np.array(s_row['state_embeddings'], dtype=np.float32)
+        tracker.update_timing('matrix_assignment', time.time() - t2, 0)
+        
+        # Obs building timing
+        t3 = time.time()
+        obs_row = {k: s_row[k] for k in s_row.keys() if k not in ['genes', 'expressions', 'state_embeddings']}
+        obs_row['library_size'] = lib_size
+        obs_row['drugname_drugconc'] = sample_to_dose.get(s_row.get('sample'), None)
         obs_data.append(obs_row)
+        tracker.update_timing('obs_building', time.time() - t3, 0)
     
     return hvg_matrix, mosaicfm_matrix, state_matrix, obs_data
+
+
 
 
 def estimate_plate_memory(state_path: str, mosaicfm_path: str, plate_value: str, n_hvg_genes: int) -> Tuple[int, float]:
@@ -169,7 +309,7 @@ def estimate_plate_memory(state_path: str, mosaicfm_path: str, plate_value: str,
 def process_plate_chunked(state_lf, mosaicfm_lf, plate_value: str, token_to_col_idx: Dict[int, int], 
                          gene_names: list, sample_to_dose: Dict[str, str], target_sum: float,
                          sample_plate_dict: Dict[str, str], chunk_size: int = 1000000) -> ad.AnnData:
-    """Process a large plate in chunks with pre-allocated arrays to manage memory efficiently."""
+    """Process a large plate in chunks with real-time performance monitoring."""
     n_hvg_genes = len(gene_names)
     
     # Get filtered data for this plate once (more efficient)
@@ -180,12 +320,12 @@ def process_plate_chunked(state_lf, mosaicfm_lf, plate_value: str, token_to_col_
     plate_samples = [sample for sample, plate in sample_plate_dict.items() if plate == plate_value]
     plate_mosaic_lf = mosaicfm_lf.filter(pl.col('sample').is_in(plate_samples))
     
-    # ASSUMPTION: Both parquet datasets have consistent ordering by BARCODE_SUB_LIB_ID
-    # This allows us to iterate through filtered data positionally without explicit sorting
-    
     # Get total rows for this plate
     plate_rows = plate_state_lf.select(pl.len()).collect().item()
     log.info(f"Processing plate {plate_value} in chunks ({plate_rows:,} cells)")
+    
+    # Initialize performance tracker
+    tracker = PlatePerformanceTracker(plate_rows, plate_value)
     
     # Pre-allocate final arrays (avoids memory accumulation)
     log.info(f"Pre-allocating arrays for {plate_rows:,} cells")
@@ -202,6 +342,8 @@ def process_plate_chunked(state_lf, mosaicfm_lf, plate_value: str, token_to_col_
         chunk_end = min(current_row + chunk_size, plate_rows)
         actual_chunk_size = chunk_end - current_row
         
+        chunk_start_time = time.time()
+        
         # Get data for this chunk (slice the already-filtered data)
         state_batch = plate_state_lf.slice(current_row, actual_chunk_size).collect()
         mosaic_batch = plate_mosaic_lf.slice(current_row, actual_chunk_size).collect()
@@ -212,9 +354,9 @@ def process_plate_chunked(state_lf, mosaicfm_lf, plate_value: str, token_to_col_
         if len(state_batch) != len(mosaic_batch):
             raise ValueError(f"Batch size mismatch: state={len(state_batch)}, mosaic={len(mosaic_batch)}")
         
-        # Process chunk using vectorized function
-        hvg_chunk, mosaicfm_chunk, state_chunk, obs_chunk = process_chunk_vectorized(
-            state_batch, mosaic_batch, token_to_col_idx, gene_names, sample_to_dose, target_sum
+        # Process chunk using simple, fast monitored function
+        hvg_chunk, mosaicfm_chunk, state_chunk, obs_chunk = process_chunk_with_monitoring(
+            state_batch, mosaic_batch, token_to_col_idx, gene_names, sample_to_dose, target_sum, tracker
         )
         
         # Validate chunk processing results
@@ -232,8 +374,15 @@ def process_plate_chunked(state_lf, mosaicfm_lf, plate_value: str, token_to_col_
         
         current_row = chunk_end
         chunk_pbar.update(actual_chunk_size)
+        
+        chunk_duration = time.time() - chunk_start_time
+        chunk_rate = actual_chunk_size / chunk_duration
+        log.info(f"Chunk completed: {chunk_rate:.0f} cells/sec")
     
     chunk_pbar.close()
+    
+    # Finalize performance tracking
+    performance_stats = tracker.finalize()
     log.info(f"Completed chunked processing for plate {plate_value}")
     
     # Create AnnData (no expensive concatenation needed)
@@ -251,12 +400,10 @@ def process_plate_chunked(state_lf, mosaicfm_lf, plate_value: str, token_to_col_
 def process_plate_whole(state_lf, mosaicfm_lf, plate_value: str, token_to_col_idx: Dict[int, int],
                        gene_names: list, sample_to_dose: Dict[str, str], target_sum: float,
                        sample_plate_dict: Dict[str, str]) -> ad.AnnData:
-    """Process entire plate in memory (for smaller plates)."""
+    """Process entire plate in memory with real-time performance monitoring."""
     n_hvg_genes = len(gene_names)
     
     log.info(f"Loading entire plate {plate_value} into memory")
-    # ASSUMPTION: Both parquet datasets have consistent ordering by BARCODE_SUB_LIB_ID
-    # This allows us to iterate through filtered data positionally without explicit sorting
     state_batch = state_lf.filter(pl.col('plate') == plate_value).collect()
     
     # Filter MosaicFM data by samples that belong to this plate
@@ -270,11 +417,16 @@ def process_plate_whole(state_lf, mosaicfm_lf, plate_value: str, token_to_col_id
     if len(state_batch) != len(mosaic_batch):
         raise ValueError(f"Batch size mismatch: state={len(state_batch)}, mosaic={len(mosaic_batch)}")
     
-    # Process entire plate using vectorized function
-    hvg_matrix, mosaicfm_matrix, state_matrix, obs_data = process_chunk_vectorized(
-        state_batch, mosaic_batch, token_to_col_idx, gene_names, sample_to_dose, target_sum
+    # Initialize performance tracker
+    tracker = PlatePerformanceTracker(plate_rows, plate_value)
+    
+    # Process entire plate using simple, fast monitored function
+    hvg_matrix, mosaicfm_matrix, state_matrix, obs_data = process_chunk_with_monitoring(
+        state_batch, mosaic_batch, token_to_col_idx, gene_names, sample_to_dose, target_sum, tracker
     )
     
+    # Finalize performance tracking
+    performance_stats = tracker.finalize()
     log.info(f"Completed whole-plate processing for plate {plate_value}")
     
     # Create AnnData
@@ -289,7 +441,15 @@ def process_plate_whole(state_lf, mosaicfm_lf, plate_value: str, token_to_col_id
     return adata
 
 
-def main(cfg: DictConfig):
+def main(cfg: DictConfig, target_plate: Optional[str] = None, list_plates: bool = False):
+    """
+    Main processing function with support for single plate processing and parallel execution.
+    
+    Args:
+        cfg: Configuration from YAML file
+        target_plate: Optional specific plate name to process (e.g., "plate11")
+        list_plates: If True, list available plates and exit
+    """
     # Setup output directory
     out_dir = Path(cfg.out_dir) / "by_plate"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -302,6 +462,32 @@ def main(cfg: DictConfig):
     
     # Discover plates
     plates = discover_plates(cfg.state_path)
+    
+    # Handle plate listing
+    if list_plates:
+        print("\n🧬 Available plates for processing:")
+        print("=" * 50)
+        for i, plate in enumerate(plates, 1):
+            # Quick check if already processed
+            output_path = out_dir / f"plate_{plate}.h5ad"
+            status = "✅ Completed" if output_path.exists() else "⏳ Pending"
+            print(f"  {i:2d}. {plate:<12} {status}")
+        print("=" * 50)
+        print(f"Total: {len(plates)} plates")
+        return
+    
+    # Handle single plate processing
+    if target_plate:
+        if target_plate not in plates:
+            log.error(f"❌ Plate '{target_plate}' not found!")
+            log.error(f"Available plates: {', '.join(plates)}")
+            sys.exit(1)
+        
+        plates = [target_plate]  # Process only the specified plate
+        log.info(f"🎯 Single plate mode: Processing only '{target_plate}'")
+        log.info(f"💡 This enables parallel processing across multiple machines")
+    else:
+        log.info(f"🔄 Processing all {len(plates)} plates sequentially")
     
     # Setup lazy frames
     log.info("Setting up lazy parquet readers...")
@@ -322,14 +508,16 @@ def main(cfg: DictConfig):
         overall_pbar = tqdm(total=len(plates), desc="Overall Progress", unit="plates")
         
         for plate_idx, plate_value in enumerate(plates):
-            log.info(f"Processing plate {plate_idx + 1}/{len(plates)}: {plate_value}")
+            log.info(f"Checking plate {plate_idx + 1}/{len(plates)}: {plate_value}")
             
-            # Check if plate already exists (skip if complete)
+            # Check if plate already exists FIRST (before any expensive operations)
             if should_skip_plate(out_dir, plate_value):
                 overall_pbar.update(1)
                 continue
             
-            # Estimate memory requirements
+            log.info(f"Processing plate {plate_value}...")
+            
+            # Only estimate memory requirements if we need to process the plate
             plate_rows, memory_gb = estimate_plate_memory(cfg.state_path, cfg.mosaicfm_path, plate_value, len(gene_names))
             log.info(f"Plate {plate_value}: {plate_rows:,} cells, estimated {memory_gb:.1f} GB memory")
             
@@ -361,9 +549,25 @@ def main(cfg: DictConfig):
 
 
 if __name__ == "__main__":
-    yaml_path = sys.argv[1]
-    cfg = om.load(yaml_path)
+    # Parse command line arguments
+    args = parse_args()
+    
+    # Load configuration
+    cfg = om.load(args.config_file)
     om.resolve(cfg)
     
-    main(cfg)
-    log.info("Script execution completed.")
+    # Log startup information
+    if args.plate:
+        log.info(f"🚀 Starting single plate processing: {args.plate}")
+    elif args.list_plates:
+        log.info("📋 Listing available plates")
+    else:
+        log.info("🚀 Starting full pipeline processing")
+    
+    # Run main processing
+    main(cfg, target_plate=args.plate, list_plates=args.list_plates)
+    
+    # Log completion
+    if not args.list_plates:
+        completion_msg = f"✅ Single plate '{args.plate}' processing completed!" if args.plate else "✅ Full pipeline processing completed!"
+        log.info(completion_msg)
