@@ -586,4 +586,8 @@ python /tahoe/drive_3/ANALYSIS/analysis_190/Code/cell-eval/pearson_delta_only.py
 ```
 
 
+```bash
+python /tahoe/drive_3/ANALYSIS/analysis_190/Code/state-tahoe-fork/scripts/create_merged_anndata_by_plate.py /tahoe/drive_3/ANALYSIS/analysis_190/Code/state-tahoe-fork/scripts/tahoe_100m_data_processing.yaml --plate plate4
+```
+
 
