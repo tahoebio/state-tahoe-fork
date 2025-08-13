@@ -17,6 +17,9 @@ import scanpy as sc
 from collections import defaultdict
 import gc
 import psutil
+import logging
+import time
+from tqdm import tqdm
 
 
 def parse_arguments():
@@ -63,7 +66,7 @@ def parse_arguments():
     parser.add_argument(
         "--verbose",
         action="store_true",
-        help="Enable verbose output"
+        help="Enable verbose output with timestamps"
     )
     
     return parser.parse_args()
@@ -105,7 +108,7 @@ def estimate_memory_usage(adata, verbose=False):
     return total_memory_gb, obsm_info
 
 
-def validate_input(adata, group_columns, verbose=False):
+def validate_input(adata, group_columns, logger=None):
     """Validate input data and grouping columns."""
     errors = []
     warnings = []
@@ -137,38 +140,44 @@ def validate_input(adata, group_columns, verbose=False):
     
     if errors:
         for error in errors:
-            print(f"ERROR: {error}", file=sys.stderr)
+            if logger:
+                logger.error(error)
+            else:
+                print(f"ERROR: {error}", file=sys.stderr)
         return False
     
     if warnings:
         for warning in warnings:
-            print(f"WARNING: {warning}", file=sys.stderr)
+            if logger:
+                logger.warning(warning)
+            else:
+                print(f"WARNING: {warning}", file=sys.stderr)
     
-    if verbose:
-        print(f"Input validation passed:")
-        print(f"  Cells: {adata.n_obs:,}")
+    if logger:
+        logger.info("Input validation passed:")
+        logger.info(f"  Cells: {adata.n_obs:,}")
         if total_missing > 0:
-            print(f"  Cells with missing values: {total_missing:,} (will be skipped)")
-        print(f"  .obsm slots: {list(adata.obsm.keys())}")
-        print(f"  Grouping columns: {group_columns}")
+            logger.info(f"  Cells with missing values: {total_missing:,} (will be skipped)")
+        logger.info(f"  .obsm slots: {list(adata.obsm.keys())}")
+        logger.info(f"  Grouping columns: {group_columns}")
         
         # Show group statistics
         for col in group_columns:
             unique_count = adata.obs[col].nunique()
-            print(f"    {col}: {unique_count} unique values")
+            logger.info(f"    {col}: {unique_count} unique values")
     
     return True
 
 
-def accumulate_group_statistics(adata, group_columns, verbose=False):
+def accumulate_group_statistics(adata, group_columns, logger=None):
     """
     Single-pass algorithm to accumulate statistics for each group.
     
     Returns:
         dict: {group_key: {obsm_name: {'sum': array, 'count': int}}}
     """
-    if verbose:
-        print("Starting single-pass accumulation...")
+    if logger:
+        logger.info("Starting single-pass accumulation...")
     
     # Initialize statistics dictionary
     group_stats = defaultdict(lambda: defaultdict(lambda: {'sum': None, 'count': 0}))
@@ -178,6 +187,9 @@ def accumulate_group_statistics(adata, group_columns, verbose=False):
     
     # Single pass through all cells
     skipped_cells = 0
+    
+    # Create progress bar
+    progress_bar = tqdm(total=n_cells, desc="Processing cells", unit="cells") if logger else None
     
     for cell_idx in range(n_cells):
         # Get group key from categorical columns
@@ -210,25 +222,32 @@ def accumulate_group_statistics(adata, group_columns, verbose=False):
             group_stats[group_key][obsm_name]['sum'] += cell_embedding.astype(np.float64)
             group_stats[group_key][obsm_name]['count'] += 1
         
-        # Progress reporting
-        if verbose and (cell_idx + 1) % progress_interval == 0:
-            progress = (cell_idx + 1) / n_cells * 100
+        # Update progress bar
+        if progress_bar:
             n_groups = len(group_stats)
-            print(f"  Progress: {cell_idx + 1:,}/{n_cells:,} cells ({progress:.1f}%), {n_groups} groups found")
+            progress_bar.set_postfix({
+                'groups': n_groups,
+                'skipped': skipped_cells
+            })
+            progress_bar.update(1)
     
-    if verbose:
+    # Close progress bar
+    if progress_bar:
+        progress_bar.close()
+    
+    if logger:
         total_groups = len(group_stats)
         processed_cells = n_cells - skipped_cells
-        print(f"Accumulation complete: {total_groups} unique groups found")
+        logger.info(f"Accumulation complete: {total_groups} unique groups found")
         if skipped_cells > 0:
-            print(f"  Processed cells: {processed_cells:,} (skipped {skipped_cells:,} with missing values)")
+            logger.info(f"  Processed cells: {processed_cells:,} (skipped {skipped_cells:,} with missing values)")
         else:
-            print(f"  Processed cells: {processed_cells:,}")
+            logger.info(f"  Processed cells: {processed_cells:,}")
     
     return dict(group_stats)
 
 
-def compute_centroids(group_stats, verbose=False):
+def compute_centroids(group_stats, logger=None):
     """
     Compute centroids from accumulated group statistics.
     
@@ -240,8 +259,8 @@ def compute_centroids(group_stats, verbose=False):
             group_keys: list of group key tuples
             centroids_dict: {obsm_name: array of centroids}
     """
-    if verbose:
-        print("Computing centroids...")
+    if logger:
+        logger.info("Computing centroids...")
     
     group_keys = list(group_stats.keys())
     n_groups = len(group_keys)
@@ -267,7 +286,12 @@ def compute_centroids(group_stats, verbose=False):
         else:
             centroids_dict[obsm_name] = np.zeros((n_groups,) + embedding_dim, dtype=np.float64)
     
-    # Compute centroids for each group
+    # Compute centroids for each group with progress tracking
+    centroid_progress = tqdm(total=n_groups, desc="Computing centroids", unit="groups") if logger and n_groups > 50 else None
+    
+    if logger and n_groups > 100:
+        logger.info(f"Computing centroids for {n_groups:,} groups across {len(obsm_names)} .obsm slots...")
+    
     for group_idx, group_key in enumerate(group_keys):
         group_data = group_stats[group_key]
         
@@ -278,18 +302,32 @@ def compute_centroids(group_stats, verbose=False):
                 centroids_dict[obsm_name][group_idx] = centroid
             else:
                 # This shouldn't happen, but handle gracefully
-                print(f"WARNING: Group {group_key} has no cells for {obsm_name}")
+                if logger:
+                    logger.warning(f"Group {group_key} has no cells for {obsm_name}")
+                else:
+                    print(f"WARNING: Group {group_key} has no cells for {obsm_name}")
+        
+        # Update progress bar
+        if centroid_progress:
+            centroid_progress.set_postfix({
+                'obsm_slots': len(obsm_names)
+            })
+            centroid_progress.update(1)
     
-    if verbose:
-        print(f"Centroids computed for {n_groups} groups across {len(obsm_names)} .obsm slots")
+    # Close progress bar
+    if centroid_progress:
+        centroid_progress.close()
+    
+    if logger:
+        logger.info(f"Centroids computed for {n_groups} groups across {len(obsm_names)} .obsm slots")
         for obsm_name in obsm_names:
             shape = centroids_dict[obsm_name].shape
-            print(f"  {obsm_name}: {shape}")
+            logger.info(f"  {obsm_name}: {shape}")
     
     return group_keys, centroids_dict
 
 
-def accumulate_group_statistics_chunked(adata, group_columns, chunk_size, verbose=False):
+def accumulate_group_statistics_chunked(adata, group_columns, chunk_size, logger=None):
     """
     Chunked version of single-pass algorithm for large files.
     
@@ -302,8 +340,8 @@ def accumulate_group_statistics_chunked(adata, group_columns, chunk_size, verbos
     Returns:
         dict: {group_key: {obsm_name: {'sum': array, 'count': int}}}
     """
-    if verbose:
-        print(f"Starting chunked accumulation (chunk size: {chunk_size:,})...")
+    if logger:
+        logger.info(f"Starting chunked accumulation (chunk size: {chunk_size:,})...")
     
     # Initialize statistics dictionary
     group_stats = defaultdict(lambda: defaultdict(lambda: {'sum': None, 'count': 0}))
@@ -312,15 +350,18 @@ def accumulate_group_statistics_chunked(adata, group_columns, chunk_size, verbos
     n_chunks = (n_cells + chunk_size - 1) // chunk_size  # Ceiling division
     total_skipped_cells = 0
     
+    # Create progress bar for chunks
+    chunk_progress = tqdm(total=n_chunks, desc="Processing chunks", unit="chunks") if logger else None
+    
     for chunk_idx in range(n_chunks):
         start_idx = chunk_idx * chunk_size
         end_idx = min(start_idx + chunk_size, n_cells)
         chunk_cells = end_idx - start_idx
         chunk_skipped = 0
         
-        if verbose:
+        if logger:
             progress = (chunk_idx + 1) / n_chunks * 100
-            print(f"  Processing chunk {chunk_idx + 1}/{n_chunks} ({progress:.1f}%): cells {start_idx:,}-{end_idx-1:,}")
+            logger.info(f"  Processing chunk {chunk_idx + 1}/{n_chunks} ({progress:.1f}%): cells {start_idx:,}-{end_idx-1:,}")
         
         # Process chunk of cells
         for cell_idx in range(start_idx, end_idx):
@@ -357,30 +398,37 @@ def accumulate_group_statistics_chunked(adata, group_columns, chunk_size, verbos
         # Update totals
         total_skipped_cells += chunk_skipped
         
-        # Progress reporting
-        if verbose:
+        # Update progress bar
+        if chunk_progress:
             n_groups = len(group_stats)
             chunk_processed = chunk_cells - chunk_skipped
-            print(f"    Processed {chunk_processed:,}/{chunk_cells:,} cells, {n_groups} total groups found so far")
-            if chunk_skipped > 0:
-                print(f"    Skipped {chunk_skipped:,} cells with missing values")
+            chunk_progress.set_postfix({
+                'groups': n_groups,
+                'processed': f"{chunk_processed}/{chunk_cells}",
+                'total_skipped': total_skipped_cells
+            })
+            chunk_progress.update(1)
         
         # Force garbage collection after each chunk to manage memory
         gc.collect()
     
-    if verbose:
+    # Close progress bar
+    if chunk_progress:
+        chunk_progress.close()
+    
+    if logger:
         total_groups = len(group_stats)
         total_processed = n_cells - total_skipped_cells
-        print(f"Chunked accumulation complete: {total_groups} unique groups found")
+        logger.info(f"Chunked accumulation complete: {total_groups} unique groups found")
         if total_skipped_cells > 0:
-            print(f"  Processed cells: {total_processed:,} (skipped {total_skipped_cells:,} with missing values)")
+            logger.info(f"  Processed cells: {total_processed:,} (skipped {total_skipped_cells:,} with missing values)")
         else:
-            print(f"  Processed cells: {total_processed:,}")
+            logger.info(f"  Processed cells: {total_processed:,}")
     
     return dict(group_stats)
 
 
-def create_output_anndata(group_keys, centroids_dict, group_columns, input_adata, verbose=False):
+def create_output_anndata(group_keys, centroids_dict, group_columns, input_adata, logger=None):
     """
     Create output AnnData object with centroids.
     
@@ -393,8 +441,8 @@ def create_output_anndata(group_keys, centroids_dict, group_columns, input_adata
     Returns:
         AnnData: New AnnData object with centroids
     """
-    if verbose:
-        print("Creating output AnnData object...")
+    if logger:
+        logger.info("Creating output AnnData object...")
     
     n_groups = len(group_keys)
     
@@ -433,41 +481,53 @@ def create_output_anndata(group_keys, centroids_dict, group_columns, input_adata
         'obsm_slots': list(centroids_dict.keys())
     }
     
-    if verbose:
-        print(f"Output AnnData created:")
-        print(f"  Groups: {n_groups}")
-        print(f"  .obsm slots: {list(centroids_dict.keys())}")
-        print(f"  Grouping columns: {group_columns}")
+    if logger:
+        logger.info(f"Output AnnData created:")
+        logger.info(f"  Groups: {n_groups}")
+        logger.info(f"  .obsm slots: {list(centroids_dict.keys())}")
+        logger.info(f"  Grouping columns: {group_columns}")
     
     return adata_out
+
+
+def setup_logging(verbose=False):
+    """Setup logging with timestamps."""
+    level = logging.INFO if verbose else logging.WARNING
+    logging.basicConfig(
+        level=level,
+        format='%(asctime)s - %(levelname)s - %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    return logging.getLogger(__name__)
 
 
 def main():
     """Main function."""
     args = parse_arguments()
     
+    # Setup logging
+    logger = setup_logging(args.verbose)
+    
     # Check if input file exists
     if not os.path.exists(args.input_file):
-        print(f"ERROR: Input file does not exist: {args.input_file}", file=sys.stderr)
+        logger.error(f"Input file does not exist: {args.input_file}")
         sys.exit(1)
     
     # Check file size
     file_size_gb = get_file_size_gb(args.input_file)
-    if args.verbose:
-        print(f"Input file size: {file_size_gb:.2f} GB")
+    logger.info(f"Input file size: {file_size_gb:.2f} GB")
     
     # Get available memory
     available_memory_gb = psutil.virtual_memory().available / (1024**3)
-    if args.verbose:
-        print(f"Available memory: {available_memory_gb:.2f} GB")
+    logger.info(f"Available memory: {available_memory_gb:.2f} GB")
     
     # Load file with memory checking
-    print("Loading .h5ad file...")
+    logger.info("Loading .h5ad file...")
     try:
         # For very large files, warn about memory usage
         if file_size_gb > args.memory_limit_gb:
-            print(f"WARNING: File size ({file_size_gb:.2f} GB) exceeds memory limit ({args.memory_limit_gb:.2f} GB)")
-            print("Will attempt to load and use chunked processing if needed")
+            logger.warning(f"File size ({file_size_gb:.2f} GB) exceeds memory limit ({args.memory_limit_gb:.2f} GB)")
+            logger.warning("Will attempt to load and use chunked processing if needed")
         
         adata = sc.read_h5ad(args.input_file, backed='r')  # Read-only backed mode for large files
         
@@ -475,66 +535,64 @@ def main():
         memory_estimate_gb, obsm_info = estimate_memory_usage(adata, verbose=args.verbose)
         
         # Validate input
-        if not validate_input(adata, args.group_by, verbose=args.verbose):
+        if not validate_input(adata, args.group_by, logger=logger):
             sys.exit(1)
         
         # Decide on processing strategy
         use_chunked = memory_estimate_gb > args.memory_limit_gb or file_size_gb > args.memory_limit_gb
         
         if use_chunked:
-            print(f"Using chunked processing (chunk size: {args.chunk_size:,} cells)")
+            logger.info(f"Using chunked processing (chunk size: {args.chunk_size:,} cells)")
             
             # Chunked single-pass algorithm
-            group_stats = accumulate_group_statistics_chunked(adata, args.group_by, args.chunk_size, verbose=args.verbose)
+            group_stats = accumulate_group_statistics_chunked(adata, args.group_by, args.chunk_size, logger=logger)
             
             # Check if any groups were found
             if len(group_stats) == 0:
-                print("ERROR: No valid groups found in the data", file=sys.stderr)
+                logger.error("No valid groups found in the data")
                 sys.exit(1)
             
             # Compute centroids
-            group_keys, centroids_dict = compute_centroids(group_stats, verbose=args.verbose)
+            group_keys, centroids_dict = compute_centroids(group_stats, logger=logger)
             
             # Create output AnnData
-            adata_out = create_output_anndata(group_keys, centroids_dict, args.group_by, adata, verbose=args.verbose)
+            adata_out = create_output_anndata(group_keys, centroids_dict, args.group_by, adata, logger=logger)
             
             # Save output
-            print(f"Saving output to {args.output_file}...")
+            logger.info(f"Saving output to {args.output_file}...")
             adata_out.write_h5ad(args.output_file)
             
-            if args.verbose:
-                print(f"Output file size: {get_file_size_gb(args.output_file):.3f} GB")
+            logger.info(f"Output file size: {get_file_size_gb(args.output_file):.3f} GB")
         else:
-            print("Using full-memory processing")
+            logger.info("Using full-memory processing")
             # Load everything into memory for faster processing
             adata = adata.to_memory()
             
             # Single-pass algorithm
-            group_stats = accumulate_group_statistics(adata, args.group_by, verbose=args.verbose)
+            group_stats = accumulate_group_statistics(adata, args.group_by, logger=logger)
             
             # Check if any groups were found
             if len(group_stats) == 0:
-                print("ERROR: No valid groups found in the data", file=sys.stderr)
+                logger.error("No valid groups found in the data")
                 sys.exit(1)
             
             # Compute centroids
-            group_keys, centroids_dict = compute_centroids(group_stats, verbose=args.verbose)
+            group_keys, centroids_dict = compute_centroids(group_stats, logger=logger)
             
             # Create output AnnData
-            adata_out = create_output_anndata(group_keys, centroids_dict, args.group_by, adata, verbose=args.verbose)
+            adata_out = create_output_anndata(group_keys, centroids_dict, args.group_by, adata, logger=logger)
             
             # Save output
-            print(f"Saving output to {args.output_file}...")
+            logger.info(f"Saving output to {args.output_file}...")
             adata_out.write_h5ad(args.output_file)
             
-            if args.verbose:
-                print(f"Output file size: {get_file_size_gb(args.output_file):.3f} GB")
+            logger.info(f"Output file size: {get_file_size_gb(args.output_file):.3f} GB")
         
     except Exception as e:
-        print(f"ERROR: Failed to load or process file: {str(e)}", file=sys.stderr)
+        logger.error(f"Failed to load or process file: {str(e)}")
         sys.exit(1)
     
-    print("Processing completed successfully!")
+    logger.info("Processing completed successfully!")
 
 
 if __name__ == "__main__":
