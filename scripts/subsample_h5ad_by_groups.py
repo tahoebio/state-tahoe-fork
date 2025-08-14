@@ -248,6 +248,106 @@ def stream_obs_for_group_selection(h5ad_file: Path, group_columns: List[str],
     return selected_indices, group_counts
 
 
+def copy_data_sequentially(input_data: h5py.Dataset, output_data: h5py.Dataset, 
+                          selected_mask: np.ndarray, total_input_cells: int,
+                          n_selected_cells: int, data_name: str = "data",
+                          sequential_chunk_size: int = 1000000) -> None:
+    """
+    Helper function to copy data using sequential pass with boolean mask filtering.
+    
+    Args:
+        input_data: Source h5py dataset to read from
+        output_data: Target h5py dataset to write to (must be pre-allocated)
+        selected_mask: Boolean array indicating which cells to select
+        total_input_cells: Total number of cells in input dataset
+        n_selected_cells: Expected number of selected cells
+        data_name: Name for progress tracking
+        sequential_chunk_size: Size of sequential chunks to process
+    """
+    output_idx = 0
+    total_bytes_processed = 0
+    
+    # Calculate bytes per cell for progress tracking
+    if len(input_data.shape) == 2:
+        bytes_per_cell = input_data.shape[1] * input_data.dtype.itemsize
+    else:
+        bytes_per_cell = input_data.dtype.itemsize
+    
+    with tqdm(total=total_input_cells, desc=f"Copying {data_name}", unit="cells") as pbar:
+        for chunk_start in range(0, total_input_cells, sequential_chunk_size):
+            chunk_end = min(chunk_start + sequential_chunk_size, total_input_cells)
+            
+            # Sequential read (fast!)
+            if len(input_data.shape) == 2:
+                chunk_data = input_data[chunk_start:chunk_end, :]
+            else:
+                chunk_data = input_data[chunk_start:chunk_end]
+            
+            # Filter to selected cells
+            chunk_mask = selected_mask[chunk_start:chunk_end]
+            if np.any(chunk_mask):
+                selected_chunk_data = chunk_data[chunk_mask]
+                
+                # Write to output
+                next_output_idx = output_idx + len(selected_chunk_data)
+                if len(output_data.shape) == 2:
+                    output_data[output_idx:next_output_idx, :] = selected_chunk_data
+                else:
+                    output_data[output_idx:next_output_idx] = selected_chunk_data
+                
+                output_idx = next_output_idx
+                total_bytes_processed += len(selected_chunk_data) * bytes_per_cell
+            
+            # Update progress
+            chunk_size_actual = chunk_end - chunk_start
+            pbar.update(chunk_size_actual)
+            pbar.set_postfix({
+                'copied': f"{output_idx:,}/{n_selected_cells:,}",
+                'GB_out': f"{total_bytes_processed / 1024**3:.1f}"
+            })
+    
+    log.info(f"{data_name} copying completed: {output_idx:,} cells, {total_bytes_processed / 1024**3:.1f} GB")
+    
+    # Verify we copied the expected number of cells
+    if output_idx != n_selected_cells:
+        log.warning(f"Mismatch in {data_name}: copied {output_idx} cells but expected {n_selected_cells}")
+
+
+def copy_1d_data_sequentially(input_data: h5py.Dataset, selected_mask: np.ndarray, 
+                             total_input_cells: int, data_name: str = "data",
+                             sequential_chunk_size: int = 1000000) -> np.ndarray:
+    """
+    Helper function to copy 1D data using sequential pass, returning the result as numpy array.
+    
+    Args:
+        input_data: Source h5py dataset to read from
+        selected_mask: Boolean array indicating which cells to select
+        total_input_cells: Total number of cells in input dataset
+        data_name: Name for progress tracking
+        sequential_chunk_size: Size of sequential chunks to process
+        
+    Returns:
+        numpy array with selected data
+    """
+    selected_data_list = []
+    
+    with tqdm(total=total_input_cells, desc=f"Copying {data_name}", unit="cells", leave=False) as pbar:
+        for chunk_start in range(0, total_input_cells, sequential_chunk_size):
+            chunk_end = min(chunk_start + sequential_chunk_size, total_input_cells)
+            
+            # Sequential read
+            chunk_data = input_data[chunk_start:chunk_end]
+            
+            # Filter to selected cells
+            chunk_mask = selected_mask[chunk_start:chunk_end]
+            if np.any(chunk_mask):
+                selected_data_list.extend(chunk_data[chunk_mask])
+            
+            pbar.update(chunk_end - chunk_start)
+    
+    return np.array(selected_data_list)
+
+
 def write_subsampled_h5ad(input_file: Path, output_file: Path, selected_indices: List[int]) -> None:
     """
     Write subsampled H5AD file using pure h5py.
@@ -261,86 +361,158 @@ def write_subsampled_h5ad(input_file: Path, output_file: Path, selected_indices:
     
     with h5py.File(input_file, 'r') as input_f, h5py.File(output_file, 'w') as output_f:
         
-        # Copy X data (main expression matrix)
-        log.info("Copying X data...")
+        # Create boolean mask for sequential copying (reused across all data types)
+        log.info("Creating boolean mask for efficient sequential copying...")
+        # Get total cells from X data dimensions
         input_x = input_f['X']
+        total_input_cells = input_x.shape[0]
+        selected_mask = np.zeros(total_input_cells, dtype=bool)
+        selected_mask[indices_array] = True
+        n_selected_cells = len(indices_array)
+        
+        # Copy X data (main expression matrix) with chunked processing
+        log.info("Copying X data with sequential processing...")
         
         if len(input_x.shape) == 2:
-            # Dense matrix
+            n_genes = input_x.shape[1]
+            
+            # Pre-allocate output dataset
             output_x = output_f.create_dataset(
                 'X', 
-                data=input_x[indices_array, :],
-                compression='gzip',
-                compression_opts=9
+                shape=(n_selected_cells, n_genes),
+                dtype=input_x.dtype
             )
+            
+            # Use helper function for sequential copying
+            log.info(f"Processing {n_selected_cells:,} selected cells from {total_input_cells:,} total cells")
+            copy_data_sequentially(
+                input_data=input_x,
+                output_data=output_x,
+                selected_mask=selected_mask,
+                total_input_cells=total_input_cells,
+                n_selected_cells=n_selected_cells,
+                data_name="X data"
+            )
+            
+            # Periodic flush for incremental writes
+            output_f.flush()
+            
         else:
-            # Handle sparse matrices if needed
-            log.warning("Sparse matrix handling not yet implemented - using dense approach")
+            # Handle non-2D matrices (sparse or other formats)
+            log.warning("Non-2D matrix detected - using sequential approach")
+            n_features = input_x.shape[1] if len(input_x.shape) > 1 else 1
+            
             output_x = output_f.create_dataset(
                 'X',
-                data=input_x[indices_array, :],
-                compression='gzip', 
-                compression_opts=9
+                shape=(n_selected_cells, n_features) if len(input_x.shape) > 1 else (n_selected_cells,),
+                dtype=input_x.dtype
             )
+            
+            # Use helper function for sequential copying
+            copy_data_sequentially(
+                input_data=input_x,
+                output_data=output_x,
+                selected_mask=selected_mask,
+                total_input_cells=total_input_cells,
+                n_selected_cells=n_selected_cells,
+                data_name="X data (non-2D)"
+            )
+            
+            output_f.flush()
         
         # Copy var data (unchanged - gene/feature info)
         log.info("Copying var data...")
         if 'var' in input_f:
             input_f.copy('var', output_f)
         
-        # Copy obs data (subsetted to selected cells)
-        log.info("Copying obs data...")
+        # Copy obs data (subsetted to selected cells) using sequential approach
+        log.info("Copying obs data with sequential processing...")
         if 'obs' in input_f:
             obs_group_out = output_f.create_group('obs')
             obs_group_in = input_f['obs']
             
-            for key in obs_group_in.keys():
-                if key == '_index':
-                    # Handle index specially
-                    if hasattr(obs_group_in[key], 'dtype'):
-                        obs_group_out.create_dataset(
-                            key,
-                            data=obs_group_in[key][indices_array]
-                        )
+            # Process each obs column using helper functions
+            with tqdm(obs_group_in.keys(), desc="Processing obs columns") as pbar:
+                for key in pbar:
+                    pbar.set_description(f"Processing obs column: {key}")
+                    
+                    if key == '_index':
+                        # Handle index specially
+                        if hasattr(obs_group_in[key], 'dtype'):
+                            selected_data = copy_1d_data_sequentially(
+                                input_data=obs_group_in[key],
+                                selected_mask=selected_mask,
+                                total_input_cells=total_input_cells,
+                                data_name=f"obs.{key}"
+                            )
+                            obs_group_out.create_dataset(key, data=selected_data)
+                        else:
+                            log.warning(f"Skipping complex _index structure")
+                            continue
                     else:
-                        log.warning(f"Skipping complex _index structure")
-                        continue
-                else:
-                    item = obs_group_in[key]
-                    if hasattr(item, 'dtype'):
-                        # Simple array
-                        obs_group_out.create_dataset(
-                            key,
-                            data=item[indices_array]
-                        )
-                    else:
-                        # Categorical - copy structure and subset codes
-                        cat_group = obs_group_out.create_group(key)
-                        # Copy categories unchanged
-                        input_f.copy(f'obs/{key}/categories', cat_group, 'categories')
-                        # Subset codes
-                        cat_group.create_dataset(
-                            'codes',
-                            data=item['codes'][indices_array]
-                        )
+                        item = obs_group_in[key]
+                        if hasattr(item, 'dtype'):
+                            # Simple array - use helper function
+                            selected_data = copy_1d_data_sequentially(
+                                input_data=item,
+                                selected_mask=selected_mask,
+                                total_input_cells=total_input_cells,
+                                data_name=f"obs.{key}"
+                            )
+                            obs_group_out.create_dataset(key, data=selected_data)
+                        else:
+                            # Categorical - copy structure and subset codes
+                            cat_group = obs_group_out.create_group(key)
+                            # Copy categories unchanged
+                            input_f.copy(f'obs/{key}/categories', cat_group, 'categories')
+                            
+                            # Subset codes using helper function
+                            selected_codes = copy_1d_data_sequentially(
+                                input_data=item['codes'],
+                                selected_mask=selected_mask,
+                                total_input_cells=total_input_cells,
+                                data_name=f"obs.{key}.codes"
+                            )
+                            cat_group.create_dataset('codes', data=selected_codes)
         
-        # Copy obsm data (cell embeddings - subsetted)
-        log.info("Copying obsm data...")
+        # Copy obsm data (cell embeddings - subsetted) using sequential approach
+        log.info("Copying obsm data with sequential processing...")
         if 'obsm' in input_f:
             obsm_group_out = output_f.create_group('obsm')
             obsm_group_in = input_f['obsm']
             
-            for key in obsm_group_in.keys():
-                embedding_data = obsm_group_in[key]
-                if len(embedding_data.shape) == 2:
-                    obsm_group_out.create_dataset(
-                        key,
-                        data=embedding_data[indices_array, :],
-                        compression='gzip'
-                    )
-                else:
-                    log.warning(f"Unexpected obsm shape for {key}: {embedding_data.shape}")
-                    obsm_group_out.create_dataset(key, data=embedding_data[indices_array])
+            with tqdm(obsm_group_in.keys(), desc="Processing obsm embeddings") as pbar:
+                for key in pbar:
+                    pbar.set_description(f"Processing obsm: {key}")
+                    embedding_data = obsm_group_in[key]
+                    
+                    if len(embedding_data.shape) == 2:
+                        # 2D embeddings - use helper function
+                        n_dims = embedding_data.shape[1]
+                        output_embedding = obsm_group_out.create_dataset(
+                            key,
+                            shape=(n_selected_cells, n_dims),
+                            dtype=embedding_data.dtype
+                        )
+                        
+                        copy_data_sequentially(
+                            input_data=embedding_data,
+                            output_data=output_embedding,
+                            selected_mask=selected_mask,
+                            total_input_cells=total_input_cells,
+                            n_selected_cells=n_selected_cells,
+                            data_name=f"obsm.{key}"
+                        )
+                    else:
+                        # 1D or unexpected shape - use helper function
+                        log.warning(f"Unexpected obsm shape for {key}: {embedding_data.shape}")
+                        selected_data = copy_1d_data_sequentially(
+                            input_data=embedding_data,
+                            selected_mask=selected_mask,
+                            total_input_cells=total_input_cells,
+                            data_name=f"obsm.{key}"
+                        )
+                        obsm_group_out.create_dataset(key, data=selected_data)
         
         # Copy remaining groups unchanged (uns, var, varm, varp, obsp)
         for group_name in ['uns', 'varm', 'varp', 'obsp']:
@@ -348,22 +520,43 @@ def write_subsampled_h5ad(input_file: Path, output_file: Path, selected_indices:
                 log.info(f"Copying {group_name} data...")
                 input_f.copy(group_name, output_f)
         
-        # Copy layers if present
+        # Copy layers if present using sequential approach
         if 'layers' in input_f:
-            log.info("Copying layers data...")
+            log.info("Copying layers data with sequential processing...")
             layers_group_out = output_f.create_group('layers')
             layers_group_in = input_f['layers']
             
-            for key in layers_group_in.keys():
-                layer_data = layers_group_in[key]
-                if len(layer_data.shape) == 2:
-                    layers_group_out.create_dataset(
-                        key,
-                        data=layer_data[indices_array, :],
-                        compression='gzip'
-                    )
-                else:
-                    layers_group_out.create_dataset(key, data=layer_data[indices_array])
+            with tqdm(layers_group_in.keys(), desc="Processing layers") as pbar:
+                for key in pbar:
+                    pbar.set_description(f"Processing layer: {key}")
+                    layer_data = layers_group_in[key]
+                    
+                    if len(layer_data.shape) == 2:
+                        # 2D layer data - use helper function
+                        n_features = layer_data.shape[1]
+                        output_layer = layers_group_out.create_dataset(
+                            key,
+                            shape=(n_selected_cells, n_features),
+                            dtype=layer_data.dtype
+                        )
+                        
+                        copy_data_sequentially(
+                            input_data=layer_data,
+                            output_data=output_layer,
+                            selected_mask=selected_mask,
+                            total_input_cells=total_input_cells,
+                            n_selected_cells=n_selected_cells,
+                            data_name=f"layers.{key}"
+                        )
+                    else:
+                        # 1D layer data - use helper function
+                        selected_data = copy_1d_data_sequentially(
+                            input_data=layer_data,
+                            selected_mask=selected_mask,
+                            total_input_cells=total_input_cells,
+                            data_name=f"layers.{key}"
+                        )
+                        layers_group_out.create_dataset(key, data=selected_data)
     
     log.info(f"Successfully wrote subsampled H5AD to {output_file}")
 
