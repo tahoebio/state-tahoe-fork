@@ -345,7 +345,7 @@ def copy_1d_data_sequentially(input_data: h5py.Dataset, selected_mask: np.ndarra
             
             pbar.update(chunk_end - chunk_start)
     
-    return np.array(selected_data_list)
+    return np.array(selected_data_list, dtype=input_data.dtype)
 
 
 def write_subsampled_h5ad(input_file: Path, output_file: Path, selected_indices: List[int]) -> None:
@@ -461,19 +461,32 @@ def write_subsampled_h5ad(input_file: Path, output_file: Path, selected_indices:
                             )
                             obs_group_out.create_dataset(key, data=selected_data)
                         else:
-                            # Categorical - copy structure and subset codes
-                            cat_group = obs_group_out.create_group(key)
-                            # Copy categories unchanged
-                            input_f.copy(f'obs/{key}/categories', cat_group, 'categories')
+                            # Categorical - convert to strings for scanpy compatibility
+                            categories = item['categories'][:]
+                            decoded_categories = np.array([
+                                s.decode('utf-8') if isinstance(s, bytes) else str(s) 
+                                for s in categories
+                            ])
                             
-                            # Subset codes using helper function
+                            # Get selected codes and convert to strings
                             selected_codes = copy_1d_data_sequentially(
                                 input_data=item['codes'],
                                 selected_mask=selected_mask,
                                 total_input_cells=total_input_cells,
                                 data_name=f"obs.{key}.codes"
                             )
-                            cat_group.create_dataset('codes', data=selected_codes)
+                            
+                            # Map codes to actual category strings
+                            selected_strings = decoded_categories[selected_codes]
+                            
+                            # Save as UTF-8 string array (scanpy-compatible)
+                            # Convert to bytes first to avoid Unicode dtype issues
+                            selected_bytes = [s.encode('utf-8') for s in selected_strings]
+                            obs_group_out.create_dataset(
+                                key, 
+                                data=selected_bytes,
+                                dtype=h5py.string_dtype(encoding='utf-8')
+                            )
         
         # Copy obsm data (cell embeddings - subsetted) using sequential approach
         log.info("Copying obsm data with sequential processing...")
