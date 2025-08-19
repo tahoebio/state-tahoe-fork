@@ -26,6 +26,8 @@ from omegaconf import OmegaConf as om, DictConfig
 from scipy import sparse
 from tqdm import tqdm
 from datasets import load_dataset
+import pyarrow.parquet as pq
+import re
 
 # === Logging Setup ===
 log = logging.getLogger(__name__)
@@ -217,6 +219,57 @@ def should_skip_plate(out_dir: Path, plate_value: str) -> bool:
     return False
 
 
+def detect_embedding_dimensions(parquet_path: str, column_name: str) -> int:
+    """
+    Detect embedding dimensions from parquet schema without loading data.
+    
+    Args:
+        parquet_path: Path to parquet file(s) (can include wildcards)
+        column_name: Name of the embedding column
+        
+    Returns:
+        int: Number of dimensions in the embedding array
+        
+    Raises:
+        ValueError: If column not found or not a fixed-size array
+    """
+    import glob
+    
+    # Handle wildcard paths
+    if '*' in parquet_path:
+        files = glob.glob(parquet_path)
+        if not files:
+            raise ValueError(f"No files found matching pattern: {parquet_path}")
+        test_file = files[0]
+    else:
+        test_file = parquet_path
+    
+    try:
+        # Read schema without loading data
+        pf = pq.ParquetFile(test_file)
+        schema = pf.schema_arrow
+        
+        # Find the embedding column
+        for field in schema:
+            if field.name == column_name:
+                # Extract dimension from fixed_size_list type
+                type_str = str(field.type)
+                if 'fixed_size_list' in type_str:
+                    # Parse dimension from string like "fixed_size_list<element: float>[2560]"
+                    match = re.search(r'\[(\d+)\]', type_str)
+                    if match:
+                        return int(match.group(1))
+                    else:
+                        raise ValueError(f"Could not parse dimensions from type: {type_str}")
+                else:
+                    raise ValueError(f"Column '{column_name}' is not a fixed-size array: {type_str}")
+        
+        raise ValueError(f"Column '{column_name}' not found in schema. Available columns: {[f.name for f in schema]}")
+        
+    except Exception as e:
+        raise ValueError(f"Failed to read schema from {test_file}: {e}")
+
+
 def discover_plates(state_path: str) -> list:
     """Discover unique plate values from the state parquet files."""
     log.info("Discovering unique plates from state data...")
@@ -230,15 +283,16 @@ def discover_plates(state_path: str) -> list:
 
 def process_chunk_with_monitoring(state_data, mosaic_data, token_to_col_idx: Dict[int, int], 
                                  gene_names: list, sample_to_dose: Dict[str, str], target_sum: float,
-                                 tracker: PlatePerformanceTracker, mosaicfm_column: str) -> Tuple[np.ndarray, np.ndarray, np.ndarray, list]:
+                                 tracker: PlatePerformanceTracker, mosaicfm_column: str, 
+                                 mosaicfm_dim: int, state_dim: int) -> Tuple[np.ndarray, np.ndarray, np.ndarray, list]:
     """Simple, fast processing with real-time performance monitoring (based on original fast script)."""
     n_hvg_genes = len(gene_names)
     chunk_size = len(state_data)
     
     # Pre-allocate output arrays
     hvg_matrix = np.zeros((chunk_size, n_hvg_genes), dtype=np.float32)
-    mosaicfm_matrix = np.zeros((chunk_size, 512), dtype=np.float32)
-    state_matrix = np.zeros((chunk_size, 2048), dtype=np.float32)
+    mosaicfm_matrix = np.zeros((chunk_size, mosaicfm_dim), dtype=np.float32)
+    state_matrix = np.zeros((chunk_size, state_dim), dtype=np.float32)
     obs_data = []
     
     # Simple, fast processing with detailed timing (like original script)
@@ -292,15 +346,16 @@ def process_chunk_with_monitoring(state_data, mosaic_data, token_to_col_idx: Dic
 
 
 
-def estimate_plate_memory(state_path: str, mosaicfm_path: str, plate_value: str, n_hvg_genes: int) -> Tuple[int, float]:
+def estimate_plate_memory(state_path: str, mosaicfm_path: str, plate_value: str, n_hvg_genes: int, 
+                         mosaicfm_dim: int, state_dim: int) -> Tuple[int, float]:
     """Estimate memory usage for a specific plate."""
     with StringCache():
         state_lf = pl.scan_parquet(state_path)
         plate_rows = state_lf.filter(pl.col('plate') == plate_value).select(pl.len()).collect().item()
         
-    # Estimate memory: rows × (2048 + 512 + actual HVG genes) × 4 bytes/float32
+    # Estimate memory: rows × (state_dim + mosaicfm_dim + actual HVG genes) × 4 bytes/float32
     # Plus overhead for obs data
-    memory_gb = plate_rows * (2048 + 512 + n_hvg_genes) * 4 / (1024**3)
+    memory_gb = plate_rows * (state_dim + mosaicfm_dim + n_hvg_genes) * 4 / (1024**3)
     memory_gb *= 1.5  # Add 50% overhead for processing
     
     return plate_rows, memory_gb
@@ -308,7 +363,8 @@ def estimate_plate_memory(state_path: str, mosaicfm_path: str, plate_value: str,
 
 def process_plate_chunked(state_lf, mosaicfm_lf, plate_value: str, token_to_col_idx: Dict[int, int], 
                          gene_names: list, sample_to_dose: Dict[str, str], target_sum: float,
-                         sample_plate_dict: Dict[str, str], mosaicfm_column: str, chunk_size: int = 1000000) -> ad.AnnData:
+                         sample_plate_dict: Dict[str, str], mosaicfm_column: str, 
+                         mosaicfm_dim: int, state_dim: int, chunk_size: int = 1000000) -> ad.AnnData:
     """Process a large plate in chunks with real-time performance monitoring."""
     n_hvg_genes = len(gene_names)
     
@@ -330,8 +386,8 @@ def process_plate_chunked(state_lf, mosaicfm_lf, plate_value: str, token_to_col_
     # Pre-allocate final arrays (avoids memory accumulation)
     log.info(f"Pre-allocating arrays for {plate_rows:,} cells")
     final_hvg = np.zeros((plate_rows, n_hvg_genes), dtype=np.float32)
-    final_mosaicfm = np.zeros((plate_rows, 512), dtype=np.float32)
-    final_state = np.zeros((plate_rows, 2048), dtype=np.float32)
+    final_mosaicfm = np.zeros((plate_rows, mosaicfm_dim), dtype=np.float32)
+    final_state = np.zeros((plate_rows, state_dim), dtype=np.float32)
     all_obs_data = [None] * plate_rows  # Pre-sized list
     
     # Process in chunks with position tracking
@@ -356,7 +412,7 @@ def process_plate_chunked(state_lf, mosaicfm_lf, plate_value: str, token_to_col_
         
         # Process chunk using simple, fast monitored function
         hvg_chunk, mosaicfm_chunk, state_chunk, obs_chunk = process_chunk_with_monitoring(
-            state_batch, mosaic_batch, token_to_col_idx, gene_names, sample_to_dose, target_sum, tracker, mosaicfm_column
+            state_batch, mosaic_batch, token_to_col_idx, gene_names, sample_to_dose, target_sum, tracker, mosaicfm_column, mosaicfm_dim, state_dim
         )
         
         # Validate chunk processing results
@@ -399,7 +455,8 @@ def process_plate_chunked(state_lf, mosaicfm_lf, plate_value: str, token_to_col_
 
 def process_plate_whole(state_lf, mosaicfm_lf, plate_value: str, token_to_col_idx: Dict[int, int],
                        gene_names: list, sample_to_dose: Dict[str, str], target_sum: float,
-                       sample_plate_dict: Dict[str, str], mosaicfm_column: str) -> ad.AnnData:
+                       sample_plate_dict: Dict[str, str], mosaicfm_column: str, 
+                       mosaicfm_dim: int, state_dim: int) -> ad.AnnData:
     """Process entire plate in memory with real-time performance monitoring."""
     n_hvg_genes = len(gene_names)
     
@@ -422,7 +479,7 @@ def process_plate_whole(state_lf, mosaicfm_lf, plate_value: str, token_to_col_id
     
     # Process entire plate using simple, fast monitored function
     hvg_matrix, mosaicfm_matrix, state_matrix, obs_data = process_chunk_with_monitoring(
-        state_batch, mosaic_batch, token_to_col_idx, gene_names, sample_to_dose, target_sum, tracker, mosaicfm_column
+        state_batch, mosaic_batch, token_to_col_idx, gene_names, sample_to_dose, target_sum, tracker, mosaicfm_column, mosaicfm_dim, state_dim
     )
     
     # Finalize performance tracking
@@ -453,6 +510,18 @@ def main(cfg: DictConfig, target_plate: Optional[str] = None, list_plates: bool 
     # Set default MosaicFM column name if not specified in config
     mosaicfm_column = cfg.get('mosaicfm_column_name', 'mosaicfm-70m-merged')
     log.info(f"Using MosaicFM column: {mosaicfm_column}")
+    
+    # Auto-detect embedding dimensions from parquet schemas
+    log.info("Auto-detecting embedding dimensions from parquet schemas...")
+    try:
+        mosaicfm_dim = detect_embedding_dimensions(cfg.mosaicfm_path, mosaicfm_column)
+        state_dim = detect_embedding_dimensions(cfg.state_path, 'state_embeddings')
+        log.info(f"Detected dimensions - MosaicFM: {mosaicfm_dim}, State: {state_dim}")
+    except Exception as e:
+        log.error(f"Failed to auto-detect dimensions: {e}")
+        log.info("Falling back to hardcoded dimensions: MosaicFM=512, State=2048")
+        mosaicfm_dim = 512
+        state_dim = 2048
     # Setup output directory
     out_dir = Path(cfg.out_dir) / "by_plate"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -521,7 +590,7 @@ def main(cfg: DictConfig, target_plate: Optional[str] = None, list_plates: bool 
             log.info(f"Processing plate {plate_value}...")
             
             # Only estimate memory requirements if we need to process the plate
-            plate_rows, memory_gb = estimate_plate_memory(cfg.state_path, cfg.mosaicfm_path, plate_value, len(gene_names))
+            plate_rows, memory_gb = estimate_plate_memory(cfg.state_path, cfg.mosaicfm_path, plate_value, len(gene_names), mosaicfm_dim, state_dim)
             log.info(f"Plate {plate_value}: {plate_rows:,} cells, estimated {memory_gb:.1f} GB memory")
             
             # Choose processing strategy based on memory
@@ -529,13 +598,15 @@ def main(cfg: DictConfig, target_plate: Optional[str] = None, list_plates: bool 
                 log.info(f"Using chunked processing (memory: {memory_gb:.1f} GB)")
                 adata = process_plate_chunked(
                     state_lf, mosaicfm_lf, plate_value, token_to_col_idx, 
-                    gene_names, sample_to_dose, cfg.target_sum, sample_plate_dict, mosaicfm_column, cfg.get('chunk_size', 1000000)
+                    gene_names, sample_to_dose, cfg.target_sum, sample_plate_dict, mosaicfm_column, 
+                    mosaicfm_dim, state_dim, cfg.get('chunk_size', 1000000)
                 )
             else:
                 log.info(f"Using whole-plate processing (memory: {memory_gb:.1f} GB)")
                 adata = process_plate_whole(
                     state_lf, mosaicfm_lf, plate_value, token_to_col_idx,
-                    gene_names, sample_to_dose, cfg.target_sum, sample_plate_dict, mosaicfm_column
+                    gene_names, sample_to_dose, cfg.target_sum, sample_plate_dict, mosaicfm_column, 
+                    mosaicfm_dim, state_dim
                 )
             
             # Save plate
