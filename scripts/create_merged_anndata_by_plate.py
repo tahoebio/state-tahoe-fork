@@ -230,7 +230,7 @@ def discover_plates(state_path: str) -> list:
 
 def process_chunk_with_monitoring(state_data, mosaic_data, token_to_col_idx: Dict[int, int], 
                                  gene_names: list, sample_to_dose: Dict[str, str], target_sum: float,
-                                 tracker: PlatePerformanceTracker) -> Tuple[np.ndarray, np.ndarray, np.ndarray, list]:
+                                 tracker: PlatePerformanceTracker, mosaicfm_column: str) -> Tuple[np.ndarray, np.ndarray, np.ndarray, list]:
     """Simple, fast processing with real-time performance monitoring (based on original fast script)."""
     n_hvg_genes = len(gene_names)
     chunk_size = len(state_data)
@@ -275,7 +275,7 @@ def process_chunk_with_monitoring(state_data, mosaic_data, token_to_col_idx: Dic
         # Matrix assignment timing
         t2 = time.time()
         hvg_matrix[i] = hvg_vec
-        mosaicfm_matrix[i] = np.array(m_row['mosaicfm-70m-merged'], dtype=np.float32)
+        mosaicfm_matrix[i] = np.array(m_row[mosaicfm_column], dtype=np.float32)
         state_matrix[i] = np.array(s_row['state_embeddings'], dtype=np.float32)
         tracker.update_timing('matrix_assignment', time.time() - t2, 0)
         
@@ -308,7 +308,7 @@ def estimate_plate_memory(state_path: str, mosaicfm_path: str, plate_value: str,
 
 def process_plate_chunked(state_lf, mosaicfm_lf, plate_value: str, token_to_col_idx: Dict[int, int], 
                          gene_names: list, sample_to_dose: Dict[str, str], target_sum: float,
-                         sample_plate_dict: Dict[str, str], chunk_size: int = 1000000) -> ad.AnnData:
+                         sample_plate_dict: Dict[str, str], mosaicfm_column: str, chunk_size: int = 1000000) -> ad.AnnData:
     """Process a large plate in chunks with real-time performance monitoring."""
     n_hvg_genes = len(gene_names)
     
@@ -356,7 +356,7 @@ def process_plate_chunked(state_lf, mosaicfm_lf, plate_value: str, token_to_col_
         
         # Process chunk using simple, fast monitored function
         hvg_chunk, mosaicfm_chunk, state_chunk, obs_chunk = process_chunk_with_monitoring(
-            state_batch, mosaic_batch, token_to_col_idx, gene_names, sample_to_dose, target_sum, tracker
+            state_batch, mosaic_batch, token_to_col_idx, gene_names, sample_to_dose, target_sum, tracker, mosaicfm_column
         )
         
         # Validate chunk processing results
@@ -399,7 +399,7 @@ def process_plate_chunked(state_lf, mosaicfm_lf, plate_value: str, token_to_col_
 
 def process_plate_whole(state_lf, mosaicfm_lf, plate_value: str, token_to_col_idx: Dict[int, int],
                        gene_names: list, sample_to_dose: Dict[str, str], target_sum: float,
-                       sample_plate_dict: Dict[str, str]) -> ad.AnnData:
+                       sample_plate_dict: Dict[str, str], mosaicfm_column: str) -> ad.AnnData:
     """Process entire plate in memory with real-time performance monitoring."""
     n_hvg_genes = len(gene_names)
     
@@ -422,7 +422,7 @@ def process_plate_whole(state_lf, mosaicfm_lf, plate_value: str, token_to_col_id
     
     # Process entire plate using simple, fast monitored function
     hvg_matrix, mosaicfm_matrix, state_matrix, obs_data = process_chunk_with_monitoring(
-        state_batch, mosaic_batch, token_to_col_idx, gene_names, sample_to_dose, target_sum, tracker
+        state_batch, mosaic_batch, token_to_col_idx, gene_names, sample_to_dose, target_sum, tracker, mosaicfm_column
     )
     
     # Finalize performance tracking
@@ -450,6 +450,9 @@ def main(cfg: DictConfig, target_plate: Optional[str] = None, list_plates: bool 
         target_plate: Optional specific plate name to process (e.g., "plate11")
         list_plates: If True, list available plates and exit
     """
+    # Set default MosaicFM column name if not specified in config
+    mosaicfm_column = cfg.get('mosaicfm_column_name', 'mosaicfm-70m-merged')
+    log.info(f"Using MosaicFM column: {mosaicfm_column}")
     # Setup output directory
     out_dir = Path(cfg.out_dir) / "by_plate"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -501,7 +504,7 @@ def main(cfg: DictConfig, target_plate: Optional[str] = None, list_plates: bool 
         log.info(f"Created mapping for {len(sample_plate_dict)} samples across {len(plates)} plates")
         
         mosaicfm_lf = pl.scan_parquet(cfg.mosaicfm_path).select([
-            "BARCODE_SUB_LIB_ID", "sample", "mosaicfm-70m-merged"
+            "BARCODE_SUB_LIB_ID", "sample", mosaicfm_column
         ])
         
         # Process each plate
@@ -526,13 +529,13 @@ def main(cfg: DictConfig, target_plate: Optional[str] = None, list_plates: bool 
                 log.info(f"Using chunked processing (memory: {memory_gb:.1f} GB)")
                 adata = process_plate_chunked(
                     state_lf, mosaicfm_lf, plate_value, token_to_col_idx, 
-                    gene_names, sample_to_dose, cfg.target_sum, sample_plate_dict, cfg.get('chunk_size', 1000000)
+                    gene_names, sample_to_dose, cfg.target_sum, sample_plate_dict, mosaicfm_column, cfg.get('chunk_size', 1000000)
                 )
             else:
                 log.info(f"Using whole-plate processing (memory: {memory_gb:.1f} GB)")
                 adata = process_plate_whole(
                     state_lf, mosaicfm_lf, plate_value, token_to_col_idx,
-                    gene_names, sample_to_dose, cfg.target_sum, sample_plate_dict
+                    gene_names, sample_to_dose, cfg.target_sum, sample_plate_dict, mosaicfm_column
                 )
             
             # Save plate
