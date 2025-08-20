@@ -1,5 +1,62 @@
 # Data Processing Scripts
 
+## centroid_pearson_baseline.py
+
+**Purpose**: Computes Pearson Delta correlation baseline for drug response prediction using pre-computed centroid embeddings.
+
+**Key Features**:
+- **Centroid-based baseline**: Uses mean perturbation effects from training data to predict test responses
+- **Plate-aware processing**: Maintains strict plate boundaries to avoid batch effects
+- **TOML split integration**: Handles complex holdout logic where unmentioned cell lines are training data
+- **Hierarchical summaries**: Provides statistics at multiple levels (per cell-type per plate, across plates, overall)
+- **Progress tracking**: Comprehensive tqdm progress bars for all major operations
+- **Memory efficient**: Computes correlations directly without storing intermediate deltas
+
+**Usage**:
+```bash
+python centroid_pearson_baseline.py \
+    --toml-file train_state_tx/tahoe_5_holdout/generalization_converted_cell_lines.toml \
+    --centroids-dir /path/to/by_plate_centroids/ \
+    --output-dir results/
+```
+
+**Input Data**:
+- **Centroid H5AD files**: Pre-computed centroids from `by_plate_centroids/` directory (e.g., `plate_plate1.h5ad`)
+- **TOML split file**: Holdout experiment definitions with train/val/test assignments
+- **Embedding key**: Typically `X_hvg` (2000-dimensional HVG embeddings)
+
+**TOML Logic**:
+1. **Implicit training data**: Cell lines NOT mentioned in TOML → all perturbations are training
+2. **Explicit holdouts**: Cell lines mentioned in TOML → only val/test perturbations held out, rest are training
+3. **Test evaluation**: Only combinations explicitly marked as 'test' are evaluated
+
+**Algorithm**:
+1. **Load centroids**: Read plate-based H5AD files maintaining plate boundaries
+2. **Parse splits**: Extract holdout logic from TOML (5 holdout cell lines, ~3,679 test combinations)
+3. **Compute mean effects**: For each perturbation, average deltas across training cell lines within each plate
+4. **Predict test**: Apply plate-specific mean effect to test cell line controls: `prediction = μ_control + δ_mean`
+5. **Evaluate**: Compute Pearson correlation between predicted and true deltas
+
+**Performance**:
+- **Baseline correlation**: 0.403 mean (std=0.159) across 4,233 test combinations
+- **Processing time**: ~4 minutes for 14 plates (66,223 total observations)
+- **Best cell line**: CVCL_1285 (0.602 correlation), Worst: CVCL_1098 (0.250 correlation)
+
+**Output Files**:
+- `detailed_correlations.csv`: Individual correlations for each (plate, cell_line, perturbation)
+- `hierarchical_summaries.json`: Multi-level statistics with overall, per-cell, and per-plate summaries
+
+**Key Implementation Details**:
+- **Index handling**: Converts pandas index to integer positions for numpy array indexing
+- **Control mapping**: Maps `DMSO_TF` to `[('DMSO_TF', 0.0, 'uM')]` format automatically
+- **NaN handling**: Sets correlation to 0.0 for constant vectors or other edge cases
+- **Validation**: Ensures controls exist for all test cell lines within each plate
+
+**Integration with Analysis Pipeline**:
+- **Upstream**: Requires centroid files from `compute_obsm_centroids.py` 
+- **Downstream**: Provides baseline metrics for comparing ML model performance
+- **Comparison**: 0.403 baseline sets performance target for state transformation models
+
 ## create_merged_anndata_by_plate.py
 
 **Purpose**: Creates plate-based AnnData files from Tahoe-100M parquet data with integrated drug dose information.
