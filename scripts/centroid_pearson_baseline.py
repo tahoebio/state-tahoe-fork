@@ -80,6 +80,11 @@ def parse_arguments():
         default='./pearson_baseline_results', 
         help='Output directory for results'
     )
+    parser.add_argument(
+        '--ignore-plate-boundaries',
+        action='store_true',
+        help='Compute global mean effects across all plates, ignoring plate boundaries (experimental)'
+    )
     
     return parser.parse_args()
 
@@ -256,6 +261,132 @@ def evaluate_plate(plate_adata, plate_name, explicit_splits, holdout_cells, cont
     return correlations
 
 
+def evaluate_global(plate_data, explicit_splits, holdout_cells, control_pert, pert_col, 
+                    cell_col, embed_key):
+    """Evaluate using global mean effects across all plates (ignoring plate boundaries)."""
+    
+    print("Computing global mean effects across all plates...")
+    
+    # Map control string if needed  
+    actual_control = f"[('{control_pert}', 0.0, 'uM')]" if control_pert == "DMSO_TF" else control_pert
+    
+    # Combine all plate data while preserving plate information
+    all_data = []
+    for plate_name, plate_adata in plate_data.items():
+        # Add plate name to a copy of obs for tracking
+        obs_copy = plate_adata.obs.copy()
+        obs_copy['original_plate'] = plate_name
+        
+        # Create temporary combined data structure
+        for idx in plate_adata.obs.index:
+            int_idx = plate_adata.obs.index.get_loc(idx)
+            all_data.append({
+                'plate': plate_name,
+                'original_index': idx,
+                'int_idx': int_idx,
+                'cell_line': plate_adata.obs.loc[idx, cell_col],
+                'perturbation': plate_adata.obs.loc[idx, pert_col],
+                'embedding': plate_adata.obsm[embed_key][int_idx],
+                'adata_ref': plate_adata  # Keep reference for later access
+            })
+    
+    print(f"  Combined {len(all_data)} observations from {len(plate_data)} plates")
+    
+    # Build global controls dictionary
+    global_controls = {}
+    control_count = 0
+    for data_point in tqdm(all_data, desc="  Loading global controls", leave=False):
+        if data_point['perturbation'] == actual_control:
+            cell_line = data_point['cell_line']
+            if cell_line not in global_controls:
+                global_controls[cell_line] = []
+            global_controls[cell_line].append(data_point['embedding'])
+            control_count += 1
+    
+    # Average controls per cell line across all plates
+    for cell_line in global_controls:
+        global_controls[cell_line] = np.mean(global_controls[cell_line], axis=0)
+    
+    print(f"  Found global controls for {len(global_controls)} cell lines ({control_count} total control observations)")
+    
+    # Get all unique perturbations (excluding control)
+    all_perturbations = set()
+    for data_point in all_data:
+        if data_point['perturbation'] != actual_control:
+            all_perturbations.add(data_point['perturbation'])
+    
+    all_perturbations = list(all_perturbations)
+    print(f"  Found {len(all_perturbations)} unique perturbations")
+    
+    # Compute global mean perturbation effects from ALL training data
+    global_pert_effects = {}
+    for pert in tqdm(all_perturbations, desc="  Computing global training effects", leave=False):
+        training_deltas = []
+        for data_point in all_data:
+            if data_point['perturbation'] == pert:
+                cell_line = data_point['cell_line']
+                # Check if this is training data using same logic as plate-specific version
+                is_training = (cell_line not in holdout_cells or 
+                              explicit_splits.get((cell_line, pert)) is None)
+                
+                if is_training and cell_line in global_controls:
+                    delta = data_point['embedding'] - global_controls[cell_line]
+                    training_deltas.append(delta)
+        
+        if training_deltas:
+            global_pert_effects[pert] = np.mean(training_deltas, axis=0)
+    
+    print(f"  Computed {len(global_pert_effects)} global perturbation effects from training data")
+    
+    # Evaluate on test set using global effects
+    test_data_points = []
+    for data_point in all_data:
+        cell_line = data_point['cell_line']
+        pert = data_point['perturbation']
+        # Check if this is test data: explicitly marked as 'test' in explicit_splits
+        is_test = explicit_splits.get((cell_line, pert)) == 'test'
+        
+        if (is_test and 
+            pert in global_pert_effects and 
+            cell_line in global_controls):
+            test_data_points.append(data_point)
+    
+    print(f"  Found {len(test_data_points)} test combinations to evaluate with global effects")
+    
+    # Compute correlations using global effects
+    correlations = []
+    for data_point in tqdm(test_data_points, desc="  Computing global correlations", leave=False):
+        cell_line = data_point['cell_line']
+        pert = data_point['perturbation']
+        plate_name = data_point['plate']
+        
+        # True delta (same as before)
+        true_delta = data_point['embedding'] - global_controls[cell_line]
+        
+        # Predicted delta (now using GLOBAL effect)
+        pred_delta = global_pert_effects[pert]
+        
+        # Compute Pearson correlation
+        if len(true_delta) > 1 and len(pred_delta) > 1:
+            corr, p_value = pearsonr(true_delta, pred_delta)
+            
+            # Handle NaN correlations (can occur with constant vectors)
+            if not np.isfinite(corr):
+                corr = 0.0
+        else:
+            corr = 0.0
+        
+        correlations.append({
+            'plate': plate_name,  # Still track plate for analysis
+            'cell_line': cell_line,
+            'perturbation': pert,
+            'pearson_correlation': corr
+        })
+    
+    print(f"  Computed {len(correlations)} test correlations using global effects")
+    return correlations
+
+
 def compute_hierarchical_summaries(all_correlations):
     """Compute summaries with progress tracking."""
     print("Computing hierarchical summaries...")
@@ -323,20 +454,33 @@ def main():
     print("="*60)
     explicit_splits, holdout_cells = parse_toml_splits(args.toml_file)
     
-    # Process each plate
+    # Process plates (either plate-aware or global)
     print("\n" + "="*60)
-    print("STEP 3: Processing plates")
+    if args.ignore_plate_boundaries:
+        print("STEP 3: Computing global effects (ignoring plate boundaries)")
+        print("WARNING: Experimental mode - computing mean effects across all plates")
+    else:
+        print("STEP 3: Processing plates (plate-aware)")
     print("="*60)
-    all_correlations = []
     
-    for plate_name, plate_adata in tqdm(plate_data.items(), desc="Processing plates"):
-        print(f"\nProcessing plate {plate_name} ({plate_adata.shape[0]} observations)...")
-        correlations = evaluate_plate(
-            plate_adata, plate_name, explicit_splits, holdout_cells,
+    if args.ignore_plate_boundaries:
+        # Global evaluation: compute mean effects across all plates
+        all_correlations = evaluate_global(
+            plate_data, explicit_splits, holdout_cells,
             args.control_pert, args.pert_col, 
             args.cell_col, args.embed_key
         )
-        all_correlations.extend(correlations)
+    else:
+        # Plate-specific evaluation: process each plate separately (original behavior)
+        all_correlations = []
+        for plate_name, plate_adata in tqdm(plate_data.items(), desc="Processing plates"):
+            print(f"\nProcessing plate {plate_name} ({plate_adata.shape[0]} observations)...")
+            correlations = evaluate_plate(
+                plate_adata, plate_name, explicit_splits, holdout_cells,
+                args.control_pert, args.pert_col, 
+                args.cell_col, args.embed_key
+            )
+            all_correlations.extend(correlations)
     
     if not all_correlations:
         print("ERROR: No test correlations computed! Check your data and parameters.")
