@@ -53,6 +53,31 @@ python centroid_context_mean_baseline.py \
 - `context_mean_detailed_correlations.csv`: Individual correlations for each (plate, cell_line, perturbation)
 - `context_mean_hierarchical_summaries.json`: Multi-level statistics with overall, per-cell, and per-plate summaries
 
+### centroid_global_mean_baseline.py
+
+**Purpose**: Computes GLOBAL MEAN baseline for drug response prediction using pre-computed centroid embeddings.
+
+**Baseline Logic**:
+- **For each plate**: Average ALL response deltas from training data (ignoring cell line and perturbation identity)
+- **Prediction**: `control(cell_line) + global_mean_delta(plate)`
+
+**Key Features**:
+- Simplest possible baseline - single average delta per plate
+- Ignores both drug and cell line context for predictions
+- Useful as lower bound for model performance comparison
+
+**Usage**:
+```bash
+python centroid_global_mean_baseline.py \
+    --toml-file train_state_tx/tahoe_5_holdout/generalization_converted_cell_lines.toml \
+    --centroids-dir /path/to/by_plate_centroids/ \
+    --output-dir results/
+```
+
+**Output Files**:
+- `global_mean_detailed_correlations.csv`: Individual correlations for each (plate, cell_line, perturbation)
+- `global_mean_hierarchical_summaries.json`: Multi-level statistics with overall, per-cell, and per-plate summaries
+
 ### Shared Implementation Details
 
 **Input Data**:
@@ -78,9 +103,35 @@ python centroid_context_mean_baseline.py \
 - **NaN handling**: Sets correlation to 0.0 for constant vectors or other edge cases
 - **Validation**: Ensures controls exist for all test cell lines within each plate
 
+**Global Mode**:
+All baseline scripts support `--ignore-plate-boundaries` flag to compute effects across all plates:
+```bash
+# Example: Perturbation mean baseline ignoring plate boundaries
+python centroid_perturbation_mean_baseline.py \
+    --toml-file train_state_tx/tahoe_5_holdout/generalization_converted_cell_lines.toml \
+    --centroids-dir /path/to/by_plate_centroids/ \
+    --output-dir results/ \
+    --ignore-plate-boundaries
+```
+
+**Performance Comparison Results**:
+
+| Baseline Type | With Plate Boundaries | Without Plate Boundaries | 
+|---|---|---|
+| **Context Mean** | 0.651 | 0.381 |
+| **Perturbation Mean** | 0.403 | 0.405 |  
+| **Global Mean** | 0.278 | 0.168 |
+
+**Key Insights**:
+- **Context mean performs best** when plate boundaries are maintained (0.651 correlation)
+- **Perturbation mean is plate-independent** (consistent ~0.40 correlation)
+- **Cell line effects are plate-dependent** while drug effects generalize across plates
+- **Plate boundaries contain significant biological signal** - all baselines suffer when ignored
+
 **Integration with Analysis Pipeline**:
 - **Upstream**: Requires centroid files from `compute_obsm_centroids.py` 
 - **Downstream**: Provides baseline metrics for comparing ML model performance
+- **Recommendation**: Use context mean baseline with plate boundaries as primary performance target
 
 ## create_merged_anndata_by_plate.py
 
