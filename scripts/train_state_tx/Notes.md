@@ -591,3 +591,24 @@ python /tahoe/drive_3/ANALYSIS/analysis_190/Code/state-tahoe-fork/scripts/create
 ```
 
 
+
+
+
+
+
+
+# Process for new 3B embeddings
+## 20250819 
+```bash
+aws s3 sync s3://vevo-ml-datasets/mosaicfm_v2/datasets/post_training/mosaicfm_3b_tahoe_100m_embeddings /tahoe/drive_3/ANALYSIS/analysis_190/Data/mosaicfm_3b_tahoe_100m_embeddings
+```
+
+```bash
+python /tahoe/drive_3/ANALYSIS/analysis_190/Code/state-tahoe-fork/scripts/create_merged_anndata_by_plate.py /tahoe/drive_3/ANALYSIS/analysis_190/Code/state-tahoe-fork/scripts/tahoe_100m_3B_data_processing.yaml --plate plate4
+```
+
+```bash
+~/queue.sh submit "python /tahoe/drive_3/ANALYSIS/analysis_190/Code/state-tahoe-fork/scripts/create_merged_anndata_by_plate.py /tahoe/drive_3/ANALYSIS/analysis_190/Code/state-tahoe-fork/scripts/tahoe_100m_3B_data_processing.yaml --plate plate1"
+```
+
+

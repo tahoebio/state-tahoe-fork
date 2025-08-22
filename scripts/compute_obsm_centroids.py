@@ -529,7 +529,7 @@ def main():
             logger.warning(f"File size ({file_size_gb:.2f} GB) exceeds memory limit ({args.memory_limit_gb:.2f} GB)")
             logger.warning("Will attempt to load and use chunked processing if needed")
         
-        adata = sc.read_h5ad(args.input_file, backed='r')  # Read-only backed mode for large files
+        adata = sc.read_h5ad(args.input_file)
         
         # Estimate memory usage for processing
         memory_estimate_gb, obsm_info = estimate_memory_usage(adata, verbose=args.verbose)
