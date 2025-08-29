@@ -479,7 +479,7 @@ def create_category_output_files(input_file: Path, output_dir: Path,
                         n_dims = embedding_data.shape[1]
                         obsm_out.create_dataset(
                             key,
-                            shape=(n_cells, n_dims),
+                            shape=(n_category_cells, n_dims),
                             dtype=embedding_data.dtype
                         )
             
@@ -495,7 +495,7 @@ def create_category_output_files(input_file: Path, output_dir: Path,
                         n_layer_features = layer_data.shape[1]
                         layers_out.create_dataset(
                             key,
-                            shape=(n_cells, n_layer_features),
+                            shape=(n_category_cells, n_layer_features),
                             dtype=layer_data.dtype
                         )
     

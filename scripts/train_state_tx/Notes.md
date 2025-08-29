@@ -594,6 +594,37 @@ python /tahoe/drive_3/ANALYSIS/analysis_190/Code/state-tahoe-fork/scripts/create
 
 
 
+```bash
+python /tahoe/drive_3/ANALYSIS/analysis_190/Code/state-tahoe-fork/scripts/mmd_state_pipeline/mmd_anndata_pair.py \
+--adata-pred adata_pred.h5ad \
+--adata-real adata_real.h5ad \
+--control-pert DMSO_TF \
+--pert-col 'drugname_drugconc' \
+--celltype-col cell_line_id \
+--embed-key-real state-SE-600M \
+--embed-key-pred state-SE-600M \
+--outdir ./mmd-results
+```
+```bash
+python /tahoe/drive_3/ANALYSIS/analysis_190/Code/state-tahoe-fork/scripts/mmd_state_pipeline/mmd_anndata_pair.py \
+--adata-pred split_00.h5ad \
+--adata-real split_01.h5ad \
+--control-pert DMSO_TF \
+--pert-col 'drugname_drugconc' \
+--celltype-col cell_line_id \
+--embed-key-real state-SE-600M \
+--embed-key-pred state-SE-600M \
+--outdir ./mmd-results
+```
+
+
+
+
+
+
+
+
+
 
 
 
@@ -610,5 +641,74 @@ python /tahoe/drive_3/ANALYSIS/analysis_190/Code/state-tahoe-fork/scripts/create
 ```bash
 ~/queue.sh submit "python /tahoe/drive_3/ANALYSIS/analysis_190/Code/state-tahoe-fork/scripts/create_merged_anndata_by_plate.py /tahoe/drive_3/ANALYSIS/analysis_190/Code/state-tahoe-fork/scripts/tahoe_100m_3B_data_processing.yaml --plate plate1"
 ```
+
+```bash
+/tahoe/drive_3/ANALYSIS/analysis_190/Code/state-tahoe-fork/scripts/train_state_tx/train_tahoe_state_tx_20250812_mfm_3b.sh
+```
+
+```bash
+state tx predict \
+--output_dir tahoe_state_tx_20250821_045711_MFM3B_hvg_full \
+--checkpoint final.ckpt \
+--profile anndata \
+--predict_only
+```
+
+```bash
+python /tahoe/drive_3/ANALYSIS/analysis_190/Code/cell-eval/pearson_delta_only.py \
+--adata-pred adata_pred.h5ad \
+--adata-real adata_real.h5ad \
+--control-pert DMSO_TF \
+--pert-col 'drugname_drugconc' \
+--celltype-col cell_line_id \
+--allow-discrete \
+--outdir ./pearson-delta-only-results
+```
+
+```bash
+python /tahoe/drive_3/ANALYSIS/analysis_190/Code/cell-eval/pearson_delta_only.py \
+--adata-pred adata_pred.h5ad \
+--adata-real adata_real.h5ad \
+--control-pert DMSO_TF \
+--pert-col 'drugname_drugconc' \
+--celltype-col cell_line_id \
+--allow-discrete \
+--group-by plate \
+--outdir ./pearson-delta-only-by-plate-results
+```
+
+```bash
+python /tahoe/drive_3/ANALYSIS/analysis_190/Code/state-tahoe-fork/scripts/mmd_state_pipeline/mmd_anndata_pair.py \
+--adata-pred adata_pred.h5ad \
+--adata-real adata_real.h5ad \
+--control-pert DMSO_TF \
+--pert-col 'drugname_drugconc' \
+--celltype-col cell_line_id \
+--embed-key-real mosaicfm-70m-merged \
+--embed-key-pred mosaicfm-70m-merged \
+--outdir ./mmd-results
+```
+
+```bash
+python /tahoe/drive_3/ANALYSIS/analysis_190/Code/state-tahoe-fork/scripts/split_h5ad_random.py \
+adata_real.h5ad \
+real_split/ \
+--n-splits 2
+```
+
+```bash
+python /tahoe/drive_3/ANALYSIS/analysis_190/Code/state-tahoe-fork/scripts/mmd_state_pipeline/mmd_anndata_pair.py \
+--adata-pred split_00.h5ad \
+--adata-real split_01.h5ad \
+--control-pert DMSO_TF \
+--pert-col 'drugname_drugconc' \
+--celltype-col cell_line_id \
+--embed-key-real mosaicfm-70m-merged \
+--embed-key-pred mosaicfm-70m-merged \
+--outdir ./mmd-results
+```
+
+
+
 
 
