@@ -174,6 +174,77 @@ def copy_data_to_splits(input_data: h5py.Dataset, output_datasets: List[h5py.Dat
         log.warning(f"Cell count mismatch in {data_name}: copied {total_copied} but expected {n_cells}")
 
 
+def copy_sparse_matrix_to_splits(input_x_group: h5py.Group, output_x_groups: List[h5py.Group],
+                                assignments: np.ndarray, n_features: int,
+                                chunk_size: int = 1000000) -> None:
+    """
+    Copy sparse matrix from input to multiple output splits based on assignments.
+    
+    Args:
+        input_x_group: Source sparse matrix group with data/indices/indptr
+        output_x_groups: List of target sparse matrix groups
+        assignments: Array indicating which split each cell belongs to
+        n_features: Number of features in the matrix
+        chunk_size: Size of chunks to process
+    """
+    n_cells = len(input_x_group['indptr']) - 1
+    n_splits = len(output_x_groups)
+    
+    # Read input sparse matrix components
+    input_data = input_x_group['data']
+    input_indices = input_x_group['indices']
+    input_indptr = input_x_group['indptr']
+    
+    log.info(f"Copying sparse X matrix with {len(input_data)} non-zero values...")
+    
+    # Initialize output lists for each split
+    split_data = [[] for _ in range(n_splits)]
+    split_indices = [[] for _ in range(n_splits)]
+    split_indptr = [[0] for _ in range(n_splits)]  # Start with 0
+    
+    with tqdm(total=n_cells, desc="Copying sparse X", unit="cells") as pbar:
+        for chunk_start in range(0, n_cells, chunk_size):
+            chunk_end = min(chunk_start + chunk_size, n_cells)
+            
+            for cell_idx in range(chunk_start, chunk_end):
+                split_idx = assignments[cell_idx]
+                
+                # Get the sparse row for this cell
+                row_start = input_indptr[cell_idx]
+                row_end = input_indptr[cell_idx + 1]
+                
+                if row_end > row_start:  # Non-empty row
+                    row_data = input_data[row_start:row_end]
+                    row_indices = input_indices[row_start:row_end]
+                    
+                    split_data[split_idx].extend(row_data)
+                    split_indices[split_idx].extend(row_indices)
+                
+                # Update indptr for this split
+                split_indptr[split_idx].append(len(split_data[split_idx]))
+            
+            pbar.update(chunk_end - chunk_start)
+    
+    # Create datasets in output files
+    for split_idx, output_group in enumerate(output_x_groups):
+        # Convert lists to arrays
+        split_data_array = np.array(split_data[split_idx], dtype=input_data.dtype)
+        split_indices_array = np.array(split_indices[split_idx], dtype=input_indices.dtype)
+        split_indptr_array = np.array(split_indptr[split_idx], dtype=input_indptr.dtype)
+        
+        # Create datasets
+        output_group.create_dataset('data', data=split_data_array)
+        output_group.create_dataset('indices', data=split_indices_array)
+        output_group.create_dataset('indptr', data=split_indptr_array)
+        
+        # Add shape attribute
+        split_n_cells = len(split_indptr_array) - 1
+        output_group.attrs['shape'] = (split_n_cells, n_features)
+        
+        log.info(f"Split {split_idx}: {len(split_data_array)} non-zero values, "
+                f"{split_n_cells} cells, {n_features} features")
+
+
 def copy_1d_data_to_splits(input_data: h5py.Dataset, assignments: np.ndarray,
                           data_name: str = "data", chunk_size: int = 1000000) -> List[np.ndarray]:
     """
@@ -215,7 +286,7 @@ def copy_1d_data_to_splits(input_data: h5py.Dataset, assignments: np.ndarray,
 
 
 def create_output_files(input_file: Path, output_dir: Path, n_splits: int, 
-                       assignments: np.ndarray, prefix: str = "split") -> List[h5py.File]:
+                       assignments: np.ndarray, prefix: str = "split") -> Tuple[List[h5py.File], int, bool]:
     """
     Create output H5AD files with proper structure and pre-allocated datasets.
     
@@ -243,7 +314,20 @@ def create_output_files(input_file: Path, output_dir: Path, n_splits: int,
     with h5py.File(input_file, 'r') as input_f:
         # Get dimensions
         input_x = input_f['X']
-        n_features = input_x.shape[1] if len(input_x.shape) == 2 else 1
+        if hasattr(input_x, 'shape'):
+            # Dense matrix
+            n_features = input_x.shape[1] if len(input_x.shape) == 2 else 1
+            is_sparse = False
+        else:
+            # Sparse matrix - get n_features from indices max + 1 or shape if available
+            if 'shape' in input_x.attrs:
+                n_features = input_x.attrs['shape'][1]
+            elif 'indices' in input_x and len(input_x['indices']) > 0:
+                n_features = int(input_x['indices'][:].max()) + 1
+            else:
+                log.error("Cannot determine number of features from sparse X matrix")
+                sys.exit(1)
+            is_sparse = True
         
         # Create output files
         for split_idx in range(n_splits):
@@ -253,19 +337,25 @@ def create_output_files(input_file: Path, output_dir: Path, n_splits: int,
             output_f = h5py.File(output_path, 'w')
             output_files.append(output_f)
             
-            # Create X dataset
-            if len(input_x.shape) == 2:
-                output_f.create_dataset(
-                    'X',
-                    shape=(split_sizes[split_idx], n_features),
-                    dtype=input_x.dtype
-                )
+            # Create X dataset/group
+            if is_sparse:
+                # For sparse matrices, create a group with sparse structure
+                x_group = output_f.create_group('X')
+                # We'll populate the sparse structure during data copying
             else:
-                output_f.create_dataset(
-                    'X',
-                    shape=(split_sizes[split_idx],),
-                    dtype=input_x.dtype
-                )
+                # Dense matrix
+                if len(input_x.shape) == 2:
+                    output_f.create_dataset(
+                        'X',
+                        shape=(split_sizes[split_idx], n_features),
+                        dtype=input_x.dtype
+                    )
+                else:
+                    output_f.create_dataset(
+                        'X',
+                        shape=(split_sizes[split_idx],),
+                        dtype=input_x.dtype
+                    )
             
             # Create obs group
             output_f.create_group('obs')
@@ -302,7 +392,7 @@ def create_output_files(input_file: Path, output_dir: Path, n_splits: int,
                             dtype=layer_data.dtype
                         )
     
-    return output_files
+    return output_files, n_features, is_sparse
 
 
 def main():
@@ -377,7 +467,18 @@ arbitrarily large H5AD files without loading them fully into memory.
                 log.error("Input file does not contain 'X' dataset")
                 sys.exit(1)
             
-            n_cells = f['X'].shape[0]
+            x_item = f['X']
+            if hasattr(x_item, 'shape'):
+                # Dense matrix
+                n_cells = x_item.shape[0]
+            else:
+                # Sparse matrix - use indptr length - 1
+                if 'indptr' in x_item:
+                    n_cells = len(x_item['indptr']) - 1
+                else:
+                    log.error("Cannot determine number of cells from X structure")
+                    sys.exit(1)
+            
             log.info(f"Input file contains {n_cells:,} cells")
         
         # Generate random assignments
@@ -387,7 +488,7 @@ arbitrarily large H5AD files without loading them fully into memory.
         
         # Phase 2: Create output files
         log.info("Phase 2: Creating output files with proper structure...")
-        output_files = create_output_files(
+        output_files, n_features, is_sparse = create_output_files(
             input_path, output_dir, args.n_splits, assignments, args.output_prefix
         )
         
@@ -397,10 +498,20 @@ arbitrarily large H5AD files without loading them fully into memory.
         with h5py.File(input_path, 'r') as input_f:
             # Copy X data
             log.info("Copying X data...")
-            output_x_datasets = [f['X'] for f in output_files]
-            copy_data_to_splits(
-                input_f['X'], output_x_datasets, assignments, "X data", args.chunk_size
-            )
+            input_x = input_f['X']
+            
+            if is_sparse:
+                # Sparse matrix
+                output_x_groups = [f['X'] for f in output_files]
+                copy_sparse_matrix_to_splits(
+                    input_x, output_x_groups, assignments, n_features, args.chunk_size
+                )
+            else:
+                # Dense matrix
+                output_x_datasets = [f['X'] for f in output_files]
+                copy_data_to_splits(
+                    input_x, output_x_datasets, assignments, "X data", args.chunk_size
+                )
             
             # Copy obs data
             log.info("Copying obs data...")
