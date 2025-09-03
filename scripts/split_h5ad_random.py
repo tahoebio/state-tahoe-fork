@@ -541,27 +541,24 @@ arbitrarily large H5AD files without loading them fully into memory.
                             for split_idx, data in enumerate(split_data):
                                 output_files[split_idx]['obs'].create_dataset(key, data=data)
                         else:
-                            # Categorical - convert to strings for scanpy compatibility
+                            # Categorical - preserve categories and codes structure
                             categories = item['categories'][:]
-                            decoded_categories = np.array([
-                                s.decode('utf-8') if isinstance(s, bytes) else str(s) 
-                                for s in categories
-                            ])
                             
                             # Get split codes
                             split_codes = copy_1d_data_to_splits(
                                 item['codes'], assignments, f"obs.{key}.codes", args.chunk_size
                             )
                             
-                            # Convert codes to strings for each split
+                            # Create categorical structure for each split
                             for split_idx, codes in enumerate(split_codes):
-                                strings = decoded_categories[codes]
-                                bytes_data = [s.encode('utf-8') for s in strings]
-                                output_files[split_idx]['obs'].create_dataset(
-                                    key, 
-                                    data=bytes_data,
-                                    dtype=h5py.string_dtype(encoding='utf-8')
-                                )
+                                # Create group for categorical column
+                                cat_group = output_files[split_idx]['obs'].create_group(key)
+                                
+                                # Copy categories (same for all splits)
+                                cat_group.create_dataset('categories', data=categories)
+                                
+                                # Copy codes for this split
+                                cat_group.create_dataset('codes', data=codes)
             
             # Copy obsm data
             if 'obsm' in input_f:
