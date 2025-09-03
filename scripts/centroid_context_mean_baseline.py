@@ -121,6 +121,7 @@ def parse_toml_splits(toml_file):
     1. If cell lines are NOT mentioned in TOML → all perturbations are training data
     2. If cell lines ARE mentioned in TOML → only val/test perturbations are held out,
        all other perturbations for those cell lines are training data
+    3. If cell lines are in 'zeroshot' section → ALL perturbations are held out (complete zero-shot)
     """
     print(f"Parsing TOML file: {toml_file}")
     
@@ -130,11 +131,22 @@ def parse_toml_splits(toml_file):
     data = toml.load(toml_file)
     
     explicit_splits = {}  # Only stores val/test combinations
-    holdout_cells = set()  # Cell lines with explicit splits
+    holdout_cells = set()  # Cell lines with explicit splits (fewshot)
+    zeroshot_cells = set()  # Cell lines with complete holdout (zeroshot)
     
+    # Handle zeroshot section - complete cell line holdouts
+    if 'zeroshot' in data:
+        cell_lines = list(data['zeroshot'].keys())
+        for cell_line_key in tqdm(cell_lines, desc="Parsing zeroshot splits"):
+            cell_line = cell_line_key.split('.')[-1]  # Extract CVCL_XXXX from "tahoe.CVCL_XXXX"
+            zeroshot_cells.add(cell_line)
+            # Mark this cell line as having zeroshot test data (all perturbations)
+            explicit_splits[(cell_line, '*')] = 'test'  # Special marker for zeroshot
+    
+    # Handle fewshot section - partial cell line holdouts
     if 'fewshot' in data:
         cell_lines = list(data['fewshot'].keys())
-        for cell_line_key in tqdm(cell_lines, desc="Parsing TOML splits"):
+        for cell_line_key in tqdm(cell_lines, desc="Parsing fewshot splits"):
             cell_line = cell_line_key.split('.')[-1]  # Extract CVCL_XXXX from "tahoe.CVCL_XXXX"
             holdout_cells.add(cell_line)
             assignments = data['fewshot'][cell_line_key]
@@ -144,8 +156,10 @@ def parse_toml_splits(toml_file):
                 if split_type in assignments:
                     for pert in assignments[split_type]:
                         explicit_splits[(cell_line, pert)] = split_type
-    else:
-        raise ValueError("TOML file missing 'fewshot' section")
+    
+    # Ensure we have at least one section
+    if not ('fewshot' in data or 'zeroshot' in data):
+        raise ValueError("TOML must have 'fewshot' or 'zeroshot' section")
     
     # Print split statistics
     split_counts = {}
@@ -154,15 +168,20 @@ def parse_toml_splits(toml_file):
     
     print(f"Explicit holdout combinations:")
     for split_type, count in split_counts.items():
-        print(f"  {split_type}: {count} combinations")
+        if split_type == 'test' and len(zeroshot_cells) > 0:
+            fewshot_test = count - len(zeroshot_cells)  # Subtract zeroshot markers
+            print(f"  {split_type}: {count} combinations ({fewshot_test} fewshot + {len(zeroshot_cells)} zeroshot)")
+        else:
+            print(f"  {split_type}: {count} combinations")
     
-    print(f"Holdout cell lines: {len(holdout_cells)} ({sorted(list(holdout_cells))})")
+    print(f"Fewshot holdout cell lines: {len(holdout_cells)} ({sorted(list(holdout_cells))})")
+    print(f"Zeroshot holdout cell lines: {len(zeroshot_cells)} ({sorted(list(zeroshot_cells))})")
     print(f"NOTE: All other cell lines and unlisted perturbations are training data")
     
-    return explicit_splits, holdout_cells
+    return explicit_splits, holdout_cells, zeroshot_cells
 
 
-def evaluate_plate(plate_adata, plate_name, explicit_splits, holdout_cells, control_pert, pert_col, 
+def evaluate_plate(plate_adata, plate_name, explicit_splits, holdout_cells, zeroshot_cells, control_pert, pert_col, 
                    cell_col, embed_key):
     """Process one plate with progress tracking."""
     
@@ -203,10 +222,14 @@ def evaluate_plate(plate_adata, plate_name, explicit_splits, holdout_cells, cont
             if pert == actual_control:
                 continue
             # Check if this is training data:
-            # 1. Cell line not in holdout_cells (implicit training) OR
-            # 2. Cell line in holdout_cells but this perturbation not in explicit_splits (implicit training)
-            is_training = (cell_line not in holdout_cells or 
-                          explicit_splits.get((cell_line, pert)) is None)
+            # 1. Cell line not in zeroshot_cells (exclude ALL data from zeroshot cells) AND
+            # 2. Cell line not in holdout_cells (implicit training) OR
+            # 3. Cell line in holdout_cells but this perturbation not in explicit_splits (implicit training)
+            is_training = (
+                cell_line not in zeroshot_cells and  # Exclude ALL data from zeroshot cells
+                (cell_line not in holdout_cells or 
+                 explicit_splits.get((cell_line, pert)) is None)
+            )
             
             if is_training:
                 # Get the integer position for the obsm array indexing
@@ -219,13 +242,28 @@ def evaluate_plate(plate_adata, plate_name, explicit_splits, holdout_cells, cont
     
     print(f"  Computed {len(cell_effects)} cell line effects from training data")
     
+    # Check for zero-shot cell lines that cannot be predicted by context mean baseline
+    zeroshot_test_cells = set()
+    for cell_line in zeroshot_cells:
+        if cell_line in controls:  # Only check cells that have controls (could be test data)
+            zeroshot_test_cells.add(cell_line)
+    
+    if zeroshot_test_cells:
+        print(f"  ERROR: Context mean baseline cannot predict for zero-shot cell lines: {sorted(zeroshot_test_cells)}")
+        print(f"  REASON: Zero-shot cells have no training data to compute cell-specific mean effects")
+        print(f"  SOLUTION: Use perturbation mean baseline or global mean baseline for zero-shot evaluation")
+    
     # Evaluate on test set
     test_indices = []
     for idx in plate_adata.obs.index:
         cell_line = plate_adata.obs.loc[idx, cell_col]
         pert = plate_adata.obs.loc[idx, pert_col]
-        # Check if this is test data: explicitly marked as 'test' in explicit_splits
-        is_test = explicit_splits.get((cell_line, pert)) == 'test'
+        # Check if this is test data: explicitly marked as 'test' in explicit_splits OR zeroshot cell
+        actual_control = f"[('{control_pert}', 0.0, 'uM')]" if control_pert == "DMSO_TF" else control_pert
+        is_test = (
+            explicit_splits.get((cell_line, pert)) == 'test' or
+            (cell_line in zeroshot_cells and pert != actual_control)
+        )
         
         if (is_test and 
             cell_line in cell_effects and 
@@ -263,14 +301,15 @@ def evaluate_plate(plate_adata, plate_name, explicit_splits, holdout_cells, cont
             'plate': plate_name,
             'cell_line': cell_line,
             'perturbation': pert,
-            'pearson_correlation': corr
+            'pearson_correlation': corr,
+            'is_plate_matched': True  # Plate-specific mode: training and test from same plate
         })
     
     print(f"  Computed {len(correlations)} test correlations for {plate_name}")
     return correlations
 
 
-def evaluate_global(plate_data, explicit_splits, holdout_cells, control_pert, pert_col, 
+def evaluate_global(plate_data, explicit_splits, holdout_cells, zeroshot_cells, control_pert, pert_col, 
                     cell_col, embed_key):
     """Evaluate using global mean effects across all plates (ignoring plate boundaries)."""
     
@@ -333,8 +372,11 @@ def evaluate_global(plate_data, explicit_splits, holdout_cells, control_pert, pe
                 if pert == actual_control:
                     continue
                 # Check if this is training data using same logic as plate-specific version
-                is_training = (cell_line not in holdout_cells or 
-                              explicit_splits.get((cell_line, pert)) is None)
+                is_training = (
+                    cell_line not in zeroshot_cells and  # Exclude ALL data from zeroshot cells
+                    (cell_line not in holdout_cells or 
+                     explicit_splits.get((cell_line, pert)) is None)
+                )
                 
                 if is_training:
                     delta = data_point['embedding'] - global_controls[cell_line]
@@ -345,13 +387,28 @@ def evaluate_global(plate_data, explicit_splits, holdout_cells, control_pert, pe
     
     print(f"  Computed {len(global_cell_effects)} global cell line effects from training data")
     
+    # Check for zero-shot cell lines that cannot be predicted by context mean baseline
+    global_zeroshot_test_cells = set()
+    for cell_line in zeroshot_cells:
+        if cell_line in global_controls:  # Only check cells that have controls (could be test data)
+            global_zeroshot_test_cells.add(cell_line)
+    
+    if global_zeroshot_test_cells:
+        print(f"  ERROR: Context mean baseline cannot predict for zero-shot cell lines: {sorted(global_zeroshot_test_cells)}")
+        print(f"  REASON: Zero-shot cells have no training data to compute cell-specific mean effects")
+        print(f"  SOLUTION: Use perturbation mean baseline or global mean baseline for zero-shot evaluation")
+    
     # Evaluate on test set using global effects
     test_data_points = []
     for data_point in all_data:
         cell_line = data_point['cell_line']
         pert = data_point['perturbation']
-        # Check if this is test data: explicitly marked as 'test' in explicit_splits
-        is_test = explicit_splits.get((cell_line, pert)) == 'test'
+        # Check if this is test data: explicitly marked as 'test' in explicit_splits OR zeroshot cell
+        actual_control = f"[('{control_pert}', 0.0, 'uM')]" if control_pert == "DMSO_TF" else control_pert
+        is_test = (
+            explicit_splits.get((cell_line, pert)) == 'test' or
+            (cell_line in zeroshot_cells and pert != actual_control)
+        )
         
         if (is_test and 
             cell_line in global_cell_effects and 
@@ -387,7 +444,8 @@ def evaluate_global(plate_data, explicit_splits, holdout_cells, control_pert, pe
             'plate': plate_name,  # Still track plate for analysis
             'cell_line': cell_line,
             'perturbation': pert,
-            'pearson_correlation': corr
+            'pearson_correlation': corr,
+            'is_plate_matched': False  # Global mode: training from multiple plates, test from specific plate
         })
     
     print(f"  Computed {len(correlations)} test correlations using global effects")
@@ -401,7 +459,7 @@ def compute_hierarchical_summaries(all_correlations):
     
     summaries = {}
     
-    with tqdm(total=4, desc="Computing summaries") as pbar:
+    with tqdm(total=5, desc="Computing summaries") as pbar:
         # 1. Per cell-type per plate
         cell_plate_summary = df.groupby(['cell_line', 'plate'])['pearson_correlation'].agg([
             'mean', 'std', 'count', 'min', 'max'
@@ -426,7 +484,30 @@ def compute_hierarchical_summaries(all_correlations):
         pbar.set_postfix({'level': 'per_plate'})
         pbar.update(1)
         
-        # 4. Overall summary
+        # 4. Plate-matching summary
+        plate_matched_df = df[df['is_plate_matched'] == True] if 'is_plate_matched' in df.columns else df[0:0]  # Empty if no plate_matched column
+        non_plate_matched_df = df[df['is_plate_matched'] == False] if 'is_plate_matched' in df.columns else df[0:0]  # Empty if no plate_matched column
+        
+        summaries['plate_matching'] = {
+            'plate_matched': {
+                'mean': float(plate_matched_df['pearson_correlation'].mean()) if len(plate_matched_df) > 0 else None,
+                'std': float(plate_matched_df['pearson_correlation'].std()) if len(plate_matched_df) > 0 else None,
+                'count': int(len(plate_matched_df)),
+                'min': float(plate_matched_df['pearson_correlation'].min()) if len(plate_matched_df) > 0 else None,
+                'max': float(plate_matched_df['pearson_correlation'].max()) if len(plate_matched_df) > 0 else None
+            },
+            'non_plate_matched': {
+                'mean': float(non_plate_matched_df['pearson_correlation'].mean()) if len(non_plate_matched_df) > 0 else None,
+                'std': float(non_plate_matched_df['pearson_correlation'].std()) if len(non_plate_matched_df) > 0 else None,
+                'count': int(len(non_plate_matched_df)),
+                'min': float(non_plate_matched_df['pearson_correlation'].min()) if len(non_plate_matched_df) > 0 else None,
+                'max': float(non_plate_matched_df['pearson_correlation'].max()) if len(non_plate_matched_df) > 0 else None
+            }
+        }
+        pbar.set_postfix({'level': 'plate_matching'})
+        pbar.update(1)
+        
+        # 5. Overall summary
         summaries['overall'] = {
             'mean': float(df['pearson_correlation'].mean()),
             'std': float(df['pearson_correlation'].std()),
@@ -459,7 +540,7 @@ def main():
     print("\n" + "="*60)
     print("STEP 2: Parsing TOML splits")
     print("="*60)
-    explicit_splits, holdout_cells = parse_toml_splits(args.toml_file)
+    explicit_splits, holdout_cells, zeroshot_cells = parse_toml_splits(args.toml_file)
     
     # Process plates (either plate-aware or global)
     print("\n" + "="*60)
@@ -473,7 +554,7 @@ def main():
     if args.ignore_plate_boundaries:
         # Global evaluation: compute mean effects across all plates
         all_correlations = evaluate_global(
-            plate_data, explicit_splits, holdout_cells,
+            plate_data, explicit_splits, holdout_cells, zeroshot_cells,
             args.control_pert, args.pert_col, 
             args.cell_col, args.embed_key
         )
@@ -483,7 +564,7 @@ def main():
         for plate_name, plate_adata in tqdm(plate_data.items(), desc="Processing plates"):
             print(f"\nProcessing plate {plate_name} ({plate_adata.shape[0]} observations)...")
             correlations = evaluate_plate(
-                plate_adata, plate_name, explicit_splits, holdout_cells,
+                plate_adata, plate_name, explicit_splits, holdout_cells, zeroshot_cells,
                 args.control_pert, args.pert_col, 
                 args.cell_col, args.embed_key
             )
