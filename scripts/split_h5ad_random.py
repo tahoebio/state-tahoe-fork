@@ -245,6 +245,39 @@ def copy_sparse_matrix_to_splits(input_x_group: h5py.Group, output_x_groups: Lis
                 f"{split_n_cells} cells, {n_features} features")
 
 
+def create_empty_sparse_x(output_x_groups: List[h5py.Group], 
+                         split_sizes: List[int], 
+                         n_features: int) -> None:
+    """
+    Create empty sparse CSR matrices for X data in output splits.
+    
+    Args:
+        output_x_groups: List of X groups to populate with empty sparse structure
+        split_sizes: Number of cells in each split
+        n_features: Number of features (genes)
+    """
+    log.info(f"Creating empty sparse X matrices with {n_features} features...")
+    
+    for split_idx, (x_group, n_cells) in enumerate(zip(output_x_groups, split_sizes)):
+        # Create empty CSR sparse matrix components
+        # data: empty float32 array
+        empty_data = np.array([], dtype=np.float32)
+        x_group.create_dataset('data', data=empty_data)
+        
+        # indices: empty int32 array
+        empty_indices = np.array([], dtype=np.int32) 
+        x_group.create_dataset('indices', data=empty_indices)
+        
+        # indptr: array of zeros with length n_cells + 1
+        empty_indptr = np.zeros(n_cells + 1, dtype=np.int32)
+        x_group.create_dataset('indptr', data=empty_indptr)
+        
+        # Set shape attribute
+        x_group.attrs['shape'] = (n_cells, n_features)
+        
+        log.info(f"Split {split_idx}: Created empty sparse matrix ({n_cells} cells, {n_features} features)")
+
+
 def copy_1d_data_to_splits(input_data: h5py.Dataset, assignments: np.ndarray,
                           data_name: str = "data", chunk_size: int = 1000000) -> List[np.ndarray]:
     """
@@ -286,7 +319,7 @@ def copy_1d_data_to_splits(input_data: h5py.Dataset, assignments: np.ndarray,
 
 
 def create_output_files(input_file: Path, output_dir: Path, n_splits: int, 
-                       assignments: np.ndarray, prefix: str = "split") -> Tuple[List[h5py.File], int, bool]:
+                       assignments: np.ndarray, prefix: str = "split", skip_x: bool = False) -> Tuple[List[h5py.File], int, bool]:
     """
     Create output H5AD files with proper structure and pre-allocated datasets.
     
@@ -296,9 +329,10 @@ def create_output_files(input_file: Path, output_dir: Path, n_splits: int,
         n_splits: Number of splits
         assignments: Cell assignments to determine sizes
         prefix: Prefix for output filenames
+        skip_x: If True, always create sparse X structure (for empty sparse matrices)
         
     Returns:
-        List of open h5py.File objects
+        Tuple of (List of open h5py.File objects, n_features, is_sparse)
     """
     log.info(f"Creating {n_splits} output files in {output_dir}")
     
@@ -328,6 +362,11 @@ def create_output_files(input_file: Path, output_dir: Path, n_splits: int,
                 log.error("Cannot determine number of features from sparse X matrix")
                 sys.exit(1)
             is_sparse = True
+        
+        # Override sparse setting if skip_x is enabled
+        if skip_x:
+            is_sparse = True
+            log.info("Skip X mode enabled - will create sparse X structure for empty matrices")
         
         # Create output files
         for split_idx in range(n_splits):
@@ -438,6 +477,9 @@ arbitrarily large H5AD files without loading them fully into memory.
                        type=int, 
                        default=42,
                        help='Random seed for reproducible splitting (default: 42)')
+    parser.add_argument('--skip-x',
+                       action='store_true',
+                       help='Skip copying X data and create empty sparse matrices instead')
     
     args = parser.parse_args()
     
@@ -489,29 +531,40 @@ arbitrarily large H5AD files without loading them fully into memory.
         # Phase 2: Create output files
         log.info("Phase 2: Creating output files with proper structure...")
         output_files, n_features, is_sparse = create_output_files(
-            input_path, output_dir, args.n_splits, assignments, args.output_prefix
+            input_path, output_dir, args.n_splits, assignments, args.output_prefix, args.skip_x
         )
         
         # Phase 3: Copy data
         log.info("Phase 3: Copying data to split files...")
         
         with h5py.File(input_path, 'r') as input_f:
-            # Copy X data
-            log.info("Copying X data...")
-            input_x = input_f['X']
-            
-            if is_sparse:
-                # Sparse matrix
+            # Copy or create empty X data
+            if args.skip_x:
+                log.info("Skipping X data copying - creating empty sparse matrices...")
+                # Calculate split sizes for empty sparse matrices
+                unique, counts = np.unique(assignments, return_counts=True)
+                split_sizes = [0] * args.n_splits
+                for split_idx, count in zip(unique, counts):
+                    split_sizes[split_idx] = count
+                
                 output_x_groups = [f['X'] for f in output_files]
-                copy_sparse_matrix_to_splits(
-                    input_x, output_x_groups, assignments, n_features, args.chunk_size
-                )
+                create_empty_sparse_x(output_x_groups, split_sizes, n_features)
             else:
-                # Dense matrix
-                output_x_datasets = [f['X'] for f in output_files]
-                copy_data_to_splits(
-                    input_x, output_x_datasets, assignments, "X data", args.chunk_size
-                )
+                log.info("Copying X data...")
+                input_x = input_f['X']
+                
+                if is_sparse:
+                    # Sparse matrix
+                    output_x_groups = [f['X'] for f in output_files]
+                    copy_sparse_matrix_to_splits(
+                        input_x, output_x_groups, assignments, n_features, args.chunk_size
+                    )
+                else:
+                    # Dense matrix
+                    output_x_datasets = [f['X'] for f in output_files]
+                    copy_data_to_splits(
+                        input_x, output_x_datasets, assignments, "X data", args.chunk_size
+                    )
             
             # Copy obs data
             log.info("Copying obs data...")

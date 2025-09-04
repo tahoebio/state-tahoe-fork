@@ -133,6 +133,39 @@ python centroid_perturbation_mean_baseline.py \
 - **Downstream**: Provides baseline metrics for comparing ML model performance
 - **Recommendation**: Use context mean baseline with plate boundaries as primary performance target
 
+## split_h5ad_random.py
+
+**Purpose**: Memory-efficient random splitting of large H5AD files into N smaller parts without loading entire files into memory.
+
+**Key Features**:
+- **Pure h5py processing**: Handles arbitrarily large files (60-100GB+) using chunked processing
+- **Sparse and dense matrix support**: Correctly preserves CSR sparse structure and dense matrices
+- **Skip X mode**: `--skip-x` flag creates empty sparse matrices instead of copying X data (reduces IO burden)
+- **Categorical data preservation**: Maintains codes/categories structure for obs columns
+- **Reproducible splitting**: Configurable random seed ensures consistent splits
+- **Flexible weighting**: Support for custom split proportions
+
+**Usage**:
+```bash
+# Standard random splitting (copies all data including X)
+python split_h5ad_random.py input.h5ad output_dir/ --n-splits 4
+
+# Skip X data for IO efficiency (creates empty sparse X matrices)
+python split_h5ad_random.py input.h5ad output_dir/ --n-splits 4 --skip-x
+
+# Custom split weights
+python split_h5ad_random.py input.h5ad output_dir/ --n-splits 3 --split-weights 0.5 0.3 0.2
+```
+
+**Output Files**:
+- `split_00.h5ad`, `split_01.h5ad`, etc.: Randomly split H5AD files with preserved AnnData structure
+- Each file contains subset of cells with identical var/uns/varm/varp data
+
+**Integration with Analysis Pipeline**:
+- **Use case**: Split large training datasets to reduce IO burden during model training
+- **Skip X mode**: Essential when models use embeddings/obs data but not raw expression (X)
+- **Tool compatibility**: Output files maintain proper H5AD structure expected by all AnnData tools
+
 ## create_merged_anndata_by_plate.py
 
 **Purpose**: Creates plate-based AnnData files from Tahoe-100M parquet data with integrated drug dose information.
