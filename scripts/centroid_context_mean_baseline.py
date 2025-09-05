@@ -6,7 +6,7 @@ This script implements the CONTEXT MEAN baseline for drug response prediction
 using pre-computed centroid embeddings. It computes mean cell line effects by 
 averaging deltas across perturbations for each cell line, then uses these cell-specific 
 effects to predict responses on test data. Evaluation uses Pearson correlation 
-between predicted and true deltas. All computations maintain strict plate boundaries 
+between predicted and true deltas. All computations maintain strict batch boundaries 
 to avoid batch effects.
 
 Baseline Logic:
@@ -14,13 +14,22 @@ Baseline Logic:
 - Prediction: control(cell_line) + mean_delta(cell_line)
 
 Key features:
-- Loads centroid H5AD files maintaining plate boundaries
+- Supports both single H5AD file with batch column or legacy plate directory structure
+- Configurable batch column for flexible batch definitions
 - Parses TOML splits for train/test assignments  
 - Computes correlations directly without storing all deltas
-- Generates hierarchical summaries: per cell-type per plate, per cell-type across plates, and overall
+- Generates hierarchical summaries: per cell-type per batch, per cell-type across batches, and overall
 - Progress tracking with tqdm for all major operations
 
 Usage:
+    # New single-file approach with batch column
+    python centroid_context_mean_baseline.py \
+        --toml-file path/to/splits.toml \
+        --centroids-file path/to/centroids.h5ad \
+        --batch-col batch_column_name \
+        --output-dir results/
+        
+    # Legacy plate-directory approach (deprecated)
     python centroid_context_mean_baseline.py \
         --toml-file path/to/splits.toml \
         --centroids-dir path/to/centroids/directory \
@@ -58,8 +67,11 @@ def parse_arguments():
     )
     parser.add_argument(
         '--centroids-dir', 
-        required=True, 
-        help='Directory containing plate centroid H5AD files (e.g., by_plate_centroids/)'
+        help='Directory containing plate centroid H5AD files (e.g., by_plate_centroids/) [DEPRECATED: use --centroids-file]'
+    )
+    parser.add_argument(
+        '--centroids-file', 
+        help='Single H5AD file containing all centroids with batch information'
     )
     parser.add_argument(
         '--cell-col', 
@@ -70,6 +82,10 @@ def parse_arguments():
         '--pert-col', 
         default='drugname_drugconc', 
         help='Column name for perturbation identifiers'
+    )
+    parser.add_argument(
+        '--batch-col', 
+        help='Column name for batch identifiers (optional, if not provided treats all data as single batch)'
     )
     parser.add_argument(
         '--control-pert', 
@@ -87,12 +103,31 @@ def parse_arguments():
         help='Output directory for results'
     )
     parser.add_argument(
+        '--ignore-batch-boundaries',
+        action='store_true',
+        help='Compute global mean effects across all batches, ignoring batch boundaries (experimental)'
+    )
+    parser.add_argument(
         '--ignore-plate-boundaries',
         action='store_true',
-        help='Compute global mean effects across all plates, ignoring plate boundaries (experimental)'
+        help='[DEPRECATED: use --ignore-batch-boundaries] Compute global mean effects across all plates'
     )
     
-    return parser.parse_args()
+    args = parser.parse_args()
+    
+    # Validation and backward compatibility
+    if not args.centroids_file and not args.centroids_dir:
+        parser.error("Must provide either --centroids-file or --centroids-dir")
+    
+    if args.centroids_file and args.centroids_dir:
+        parser.error("Cannot provide both --centroids-file and --centroids-dir, choose one")
+    
+    # Handle backward compatibility for ignore boundaries
+    if args.ignore_plate_boundaries and not args.ignore_batch_boundaries:
+        args.ignore_batch_boundaries = True
+        print("WARNING: --ignore-plate-boundaries is deprecated, using --ignore-batch-boundaries")
+    
+    return args
 
 
 def load_plate_centroids(centroids_dir):
@@ -112,6 +147,131 @@ def load_plate_centroids(centroids_dir):
         print(f"  Loaded {plate_name}: {adata.shape[0]} observations, {adata.shape[1]} variables")
     
     return plate_data
+
+
+def load_batch_data(centroids_file=None, centroids_dir=None, batch_col=None):
+    """Load batch data with progress tracking.
+    
+    Args:
+        centroids_file: Path to single H5AD file (new approach)
+        centroids_dir: Directory with plate_*.h5ad files (legacy approach)  
+        batch_col: Column name for batch identifiers (optional)
+        
+    Returns:
+        dict: batch_name -> AnnData mapping
+    """
+    
+    # Legacy plate-based loading
+    if centroids_dir:
+        print("Using legacy plate-based loading...")
+        return load_plate_centroids(centroids_dir)
+    
+    # New single file approach
+    if not centroids_file:
+        raise ValueError("Must provide either centroids_file or centroids_dir")
+        
+    print(f"Loading single centroids file: {centroids_file}")
+    
+    if not os.path.exists(centroids_file):
+        raise ValueError(f"Centroids file not found: {centroids_file}")
+        
+    print("Reading H5AD file...")
+    # Only load obs and obsm since we don't need the X matrix
+    import pandas as pd
+    import h5py
+    
+    def decode_categorical_column(obs_group: h5py.Group, column_name: str) -> np.ndarray:
+        """
+        Decode a categorical column from H5AD obs group.
+        Handles both string and categorical (codes/categories) formats.
+        Also handles double-encoded categories like b"b'value'".
+        """
+        column_item = obs_group[column_name]
+        
+        if hasattr(column_item, 'dtype'):
+            # Direct string/numeric column
+            values = column_item[:]
+            if column_item.dtype.kind in ['S', 'U']:
+                return values.astype(str)
+            else:
+                return values
+        else:
+            # Categorical column with codes/categories structure
+            codes = column_item['codes'][:]
+            categories = column_item['categories'][:]
+            
+            decoded_categories = []
+            for cat in categories:
+                # First decode bytes to string
+                if isinstance(cat, bytes):
+                    cat_str = cat.decode('utf-8')
+                else:
+                    cat_str = str(cat)
+                
+                # Handle double-encoded format like "b'value'" -> "value"
+                if cat_str.startswith("b'") and cat_str.endswith("'"):
+                    cat_str = cat_str[2:-1]  # Remove b' and trailing '
+                elif cat_str.startswith('b"') and cat_str.endswith('"'):
+                    cat_str = cat_str[2:-1]  # Remove b" and trailing "
+                    
+                decoded_categories.append(cat_str)
+            
+            return np.array(decoded_categories)[codes]
+    
+    with h5py.File(centroids_file, 'r') as f:
+        # Load obs metadata from HDF5 group structure
+        obs_data = {}
+        if 'obs' in f:
+            obs_group = f['obs']
+            for key in obs_group.keys():
+                if key == '_index':
+                    # Handle index specially
+                    obs_data['index'] = obs_group[key][:].astype(str)
+                else:
+                    # Use the proper categorical decoder
+                    obs_data[key] = decode_categorical_column(obs_group, key)
+        
+        # Create DataFrame from obs data
+        obs = pd.DataFrame(obs_data)
+        if 'index' in obs_data:
+            obs.index = obs_data['index']
+            obs = obs.drop('index', axis=1)
+        
+        print(f"  Loaded obs with columns: {list(obs.columns)}")
+        print(f"  Sample values: {dict(obs.iloc[0])}")
+        
+        # Create minimal AnnData object (we'll add obsm separately) 
+        adata = ad.AnnData(obs=obs)
+        
+        # Load only the obsm embeddings we need
+        if 'obsm' in f:
+            for key in f['obsm'].keys():
+                adata.obsm[key] = f['obsm'][key][:]
+                print(f"  Loaded obsm['{key}'] with shape: {f['obsm'][key].shape}")
+    
+    print(f"Loaded data: {adata.shape[0]} observations, obsm keys: {list(adata.obsm.keys())}")
+    
+    batch_data = {}
+    
+    # If no batch column specified, treat all data as single batch
+    if not batch_col or batch_col not in adata.obs.columns:
+        if batch_col and batch_col not in adata.obs.columns:
+            print(f"WARNING: Batch column '{batch_col}' not found in data, treating as single batch")
+        print("Treating all data as single batch named 'all'")
+        batch_data['all'] = adata
+        return batch_data
+    
+    # Split data by batch column
+    unique_batches = adata.obs[batch_col].unique()
+    print(f"Found {len(unique_batches)} unique batches in column '{batch_col}': {sorted(unique_batches)}")
+    
+    for batch_name in tqdm(unique_batches, desc="Splitting data by batches"):
+        batch_mask = adata.obs[batch_col] == batch_name
+        batch_adata = adata[batch_mask].copy()
+        batch_data[str(batch_name)] = batch_adata
+        print(f"  Batch {batch_name}: {batch_adata.shape[0]} observations")
+    
+    return batch_data
 
 
 def parse_toml_splits(toml_file):
@@ -181,29 +341,29 @@ def parse_toml_splits(toml_file):
     return explicit_splits, holdout_cells, zeroshot_cells
 
 
-def evaluate_plate(plate_adata, plate_name, explicit_splits, holdout_cells, zeroshot_cells, control_pert, pert_col, 
+def evaluate_batch(batch_adata, batch_name, explicit_splits, holdout_cells, zeroshot_cells, control_pert, pert_col, 
                    cell_col, embed_key):
-    """Process one plate with progress tracking."""
+    """Process one batch with progress tracking."""
     
     # Map control string if needed  
     actual_control = f"[('{control_pert}', 0.0, 'uM')]" if control_pert == "DMSO_TF" else control_pert
     
-    # Get controls for this plate
+    # Get controls for this batch
     controls = {}
-    control_mask = plate_adata.obs[pert_col] == actual_control
+    control_mask = batch_adata.obs[pert_col] == actual_control
     
     if not control_mask.any():
-        print(f"  WARNING: No control perturbation '{actual_control}' found in plate {plate_name}")
+        print(f"  WARNING: No control perturbation '{actual_control}' found in batch {batch_name}")
         return []
     
-    control_indices = plate_adata.obs[control_mask].index
+    control_indices = batch_adata.obs[control_mask].index
     for i, idx in enumerate(tqdm(control_indices, 
-                                desc=f"  Loading controls for {plate_name}", 
+                                desc=f"  Loading controls for {batch_name}", 
                                 leave=False)):
-        cell_line = plate_adata.obs.loc[idx, cell_col]
+        cell_line = batch_adata.obs.loc[idx, cell_col]
         # Get the integer position for the obsm array indexing
-        int_idx = plate_adata.obs.index.get_loc(idx)
-        controls[cell_line] = plate_adata.obsm[embed_key][int_idx]
+        int_idx = batch_adata.obs.index.get_loc(idx)
+        controls[cell_line] = batch_adata.obsm[embed_key][int_idx]
     
     print(f"  Found controls for {len(controls)} cell lines")
     
@@ -213,11 +373,11 @@ def evaluate_plate(plate_adata, plate_name, explicit_splits, holdout_cells, zero
     # Compute mean cell line effects from training data
     cell_effects = {}
     for cell_line in tqdm(cell_lines, 
-                         desc=f"  Computing training effects for {plate_name}", 
+                         desc=f"  Computing training effects for {batch_name}", 
                          leave=False):
         training_deltas = []
-        for idx in plate_adata.obs[plate_adata.obs[cell_col] == cell_line].index:
-            pert = plate_adata.obs.loc[idx, pert_col]
+        for idx in batch_adata.obs[batch_adata.obs[cell_col] == cell_line].index:
+            pert = batch_adata.obs.loc[idx, pert_col]
             # Skip control perturbations
             if pert == actual_control:
                 continue
@@ -233,8 +393,8 @@ def evaluate_plate(plate_adata, plate_name, explicit_splits, holdout_cells, zero
             
             if is_training:
                 # Get the integer position for the obsm array indexing
-                int_idx = plate_adata.obs.index.get_loc(idx)
-                delta = plate_adata.obsm[embed_key][int_idx] - controls[cell_line]
+                int_idx = batch_adata.obs.index.get_loc(idx)
+                delta = batch_adata.obsm[embed_key][int_idx] - controls[cell_line]
                 training_deltas.append(delta)
         
         if training_deltas:
@@ -255,9 +415,9 @@ def evaluate_plate(plate_adata, plate_name, explicit_splits, holdout_cells, zero
     
     # Evaluate on test set
     test_indices = []
-    for idx in plate_adata.obs.index:
-        cell_line = plate_adata.obs.loc[idx, cell_col]
-        pert = plate_adata.obs.loc[idx, pert_col]
+    for idx in batch_adata.obs.index:
+        cell_line = batch_adata.obs.loc[idx, cell_col]
+        pert = batch_adata.obs.loc[idx, pert_col]
         # Check if this is test data: explicitly marked as 'test' in explicit_splits OR zeroshot cell
         actual_control = f"[('{control_pert}', 0.0, 'uM')]" if control_pert == "DMSO_TF" else control_pert
         is_test = (
@@ -274,15 +434,15 @@ def evaluate_plate(plate_adata, plate_name, explicit_splits, holdout_cells, zero
     
     correlations = []
     for idx in tqdm(test_indices, 
-                    desc=f"  Computing correlations for {plate_name}", 
+                    desc=f"  Computing correlations for {batch_name}", 
                     leave=False):
-        cell_line = plate_adata.obs.loc[idx, cell_col]
-        pert = plate_adata.obs.loc[idx, pert_col]
+        cell_line = batch_adata.obs.loc[idx, cell_col]
+        pert = batch_adata.obs.loc[idx, pert_col]
         
         # True delta
         # Get the integer position for the obsm array indexing  
-        int_idx = plate_adata.obs.index.get_loc(idx)
-        true_delta = plate_adata.obsm[embed_key][int_idx] - controls[cell_line]
+        int_idx = batch_adata.obs.index.get_loc(idx)
+        true_delta = batch_adata.obsm[embed_key][int_idx] - controls[cell_line]
         
         # Predicted delta (mean effect from cell line's training perturbations)
         pred_delta = cell_effects[cell_line]
@@ -298,47 +458,47 @@ def evaluate_plate(plate_adata, plate_name, explicit_splits, holdout_cells, zero
             corr = 0.0
         
         correlations.append({
-            'plate': plate_name,
+            'batch': batch_name,
             'cell_line': cell_line,
             'perturbation': pert,
             'pearson_correlation': corr,
-            'is_plate_matched': True  # Plate-specific mode: training and test from same plate
+            'is_batch_matched': True  # Batch-specific mode: training and test from same batch
         })
     
-    print(f"  Computed {len(correlations)} test correlations for {plate_name}")
+    print(f"  Computed {len(correlations)} test correlations for {batch_name}")
     return correlations
 
 
-def evaluate_global(plate_data, explicit_splits, holdout_cells, zeroshot_cells, control_pert, pert_col, 
+def evaluate_global(batch_data, explicit_splits, holdout_cells, zeroshot_cells, control_pert, pert_col, 
                     cell_col, embed_key):
-    """Evaluate using global mean effects across all plates (ignoring plate boundaries)."""
+    """Evaluate using global mean effects across all batches (ignoring batch boundaries)."""
     
-    print("Computing global mean effects across all plates...")
+    print("Computing global mean effects across all batches...")
     
     # Map control string if needed  
     actual_control = f"[('{control_pert}', 0.0, 'uM')]" if control_pert == "DMSO_TF" else control_pert
     
-    # Combine all plate data while preserving plate information
+    # Combine all batch data while preserving batch information
     all_data = []
-    for plate_name, plate_adata in plate_data.items():
-        # Add plate name to a copy of obs for tracking
-        obs_copy = plate_adata.obs.copy()
-        obs_copy['original_plate'] = plate_name
+    for batch_name, batch_adata in batch_data.items():
+        # Add batch name to a copy of obs for tracking
+        obs_copy = batch_adata.obs.copy()
+        obs_copy['original_batch'] = batch_name
         
         # Create temporary combined data structure
-        for idx in plate_adata.obs.index:
-            int_idx = plate_adata.obs.index.get_loc(idx)
+        for idx in batch_adata.obs.index:
+            int_idx = batch_adata.obs.index.get_loc(idx)
             all_data.append({
-                'plate': plate_name,
+                'batch': batch_name,
                 'original_index': idx,
                 'int_idx': int_idx,
-                'cell_line': plate_adata.obs.loc[idx, cell_col],
-                'perturbation': plate_adata.obs.loc[idx, pert_col],
-                'embedding': plate_adata.obsm[embed_key][int_idx],
-                'adata_ref': plate_adata  # Keep reference for later access
+                'cell_line': batch_adata.obs.loc[idx, cell_col],
+                'perturbation': batch_adata.obs.loc[idx, pert_col],
+                'embedding': batch_adata.obsm[embed_key][int_idx],
+                'adata_ref': batch_adata  # Keep reference for later access
             })
     
-    print(f"  Combined {len(all_data)} observations from {len(plate_data)} plates")
+    print(f"  Combined {len(all_data)} observations from {len(batch_data)} batches")
     
     # Build global controls dictionary
     global_controls = {}
@@ -422,7 +582,7 @@ def evaluate_global(plate_data, explicit_splits, holdout_cells, zeroshot_cells, 
     for data_point in tqdm(test_data_points, desc="  Computing global correlations", leave=False):
         cell_line = data_point['cell_line']
         pert = data_point['perturbation']
-        plate_name = data_point['plate']
+        batch_name = data_point['batch']
         
         # True delta (same as before)
         true_delta = data_point['embedding'] - global_controls[cell_line]
@@ -441,11 +601,11 @@ def evaluate_global(plate_data, explicit_splits, holdout_cells, zeroshot_cells, 
             corr = 0.0
         
         correlations.append({
-            'plate': plate_name,  # Still track plate for analysis
+            'batch': batch_name,  # Still track batch for analysis
             'cell_line': cell_line,
             'perturbation': pert,
             'pearson_correlation': corr,
-            'is_plate_matched': False  # Global mode: training from multiple plates, test from specific plate
+            'is_batch_matched': False  # Global mode: training from multiple batches, test from specific batch
         })
     
     print(f"  Computed {len(correlations)} test correlations using global effects")
@@ -460,51 +620,51 @@ def compute_hierarchical_summaries(all_correlations):
     summaries = {}
     
     with tqdm(total=5, desc="Computing summaries") as pbar:
-        # 1. Per cell-type per plate
-        cell_plate_summary = df.groupby(['cell_line', 'plate'])['pearson_correlation'].agg([
+        # 1. Per cell-type per batch
+        cell_batch_summary = df.groupby(['cell_line', 'batch'])['pearson_correlation'].agg([
             'mean', 'std', 'count', 'min', 'max'
         ]).reset_index()
-        summaries['per_cell_per_plate'] = cell_plate_summary.to_dict('records')
-        pbar.set_postfix({'level': 'cell_per_plate'})
+        summaries['per_cell_per_batch'] = cell_batch_summary.to_dict('records')
+        pbar.set_postfix({'level': 'cell_per_batch'})
         pbar.update(1)
         
-        # 2. Per cell-type across plates
+        # 2. Per cell-type across batches
         cell_summary = df.groupby('cell_line')['pearson_correlation'].agg([
             'mean', 'std', 'count', 'min', 'max'
         ]).reset_index()
-        summaries['per_cell_across_plates'] = cell_summary.to_dict('records')
-        pbar.set_postfix({'level': 'cell_across_plates'})
+        summaries['per_cell_across_batches'] = cell_summary.to_dict('records')
+        pbar.set_postfix({'level': 'cell_across_batches'})
         pbar.update(1)
         
-        # 3. Per plate across cell types
-        plate_summary = df.groupby('plate')['pearson_correlation'].agg([
+        # 3. Per batch across cell types
+        batch_summary = df.groupby('batch')['pearson_correlation'].agg([
             'mean', 'std', 'count', 'min', 'max'  
         ]).reset_index()
-        summaries['per_plate'] = plate_summary.to_dict('records')
-        pbar.set_postfix({'level': 'per_plate'})
+        summaries['per_batch'] = batch_summary.to_dict('records')
+        pbar.set_postfix({'level': 'per_batch'})
         pbar.update(1)
         
-        # 4. Plate-matching summary
-        plate_matched_df = df[df['is_plate_matched'] == True] if 'is_plate_matched' in df.columns else df[0:0]  # Empty if no plate_matched column
-        non_plate_matched_df = df[df['is_plate_matched'] == False] if 'is_plate_matched' in df.columns else df[0:0]  # Empty if no plate_matched column
+        # 4. Batch-matching summary
+        batch_matched_df = df[df['is_batch_matched'] == True] if 'is_batch_matched' in df.columns else df[0:0]  # Empty if no batch_matched column
+        non_batch_matched_df = df[df['is_batch_matched'] == False] if 'is_batch_matched' in df.columns else df[0:0]  # Empty if no batch_matched column
         
-        summaries['plate_matching'] = {
-            'plate_matched': {
-                'mean': float(plate_matched_df['pearson_correlation'].mean()) if len(plate_matched_df) > 0 else None,
-                'std': float(plate_matched_df['pearson_correlation'].std()) if len(plate_matched_df) > 0 else None,
-                'count': int(len(plate_matched_df)),
-                'min': float(plate_matched_df['pearson_correlation'].min()) if len(plate_matched_df) > 0 else None,
-                'max': float(plate_matched_df['pearson_correlation'].max()) if len(plate_matched_df) > 0 else None
+        summaries['batch_matching'] = {
+            'batch_matched': {
+                'mean': float(batch_matched_df['pearson_correlation'].mean()) if len(batch_matched_df) > 0 else None,
+                'std': float(batch_matched_df['pearson_correlation'].std()) if len(batch_matched_df) > 0 else None,
+                'count': int(len(batch_matched_df)),
+                'min': float(batch_matched_df['pearson_correlation'].min()) if len(batch_matched_df) > 0 else None,
+                'max': float(batch_matched_df['pearson_correlation'].max()) if len(batch_matched_df) > 0 else None
             },
-            'non_plate_matched': {
-                'mean': float(non_plate_matched_df['pearson_correlation'].mean()) if len(non_plate_matched_df) > 0 else None,
-                'std': float(non_plate_matched_df['pearson_correlation'].std()) if len(non_plate_matched_df) > 0 else None,
-                'count': int(len(non_plate_matched_df)),
-                'min': float(non_plate_matched_df['pearson_correlation'].min()) if len(non_plate_matched_df) > 0 else None,
-                'max': float(non_plate_matched_df['pearson_correlation'].max()) if len(non_plate_matched_df) > 0 else None
+            'non_batch_matched': {
+                'mean': float(non_batch_matched_df['pearson_correlation'].mean()) if len(non_batch_matched_df) > 0 else None,
+                'std': float(non_batch_matched_df['pearson_correlation'].std()) if len(non_batch_matched_df) > 0 else None,
+                'count': int(len(non_batch_matched_df)),
+                'min': float(non_batch_matched_df['pearson_correlation'].min()) if len(non_batch_matched_df) > 0 else None,
+                'max': float(non_batch_matched_df['pearson_correlation'].max()) if len(non_batch_matched_df) > 0 else None
             }
         }
-        pbar.set_postfix({'level': 'plate_matching'})
+        pbar.set_postfix({'level': 'batch_matching'})
         pbar.update(1)
         
         # 5. Overall summary
@@ -533,38 +693,42 @@ def main():
     
     # Load data
     print("\n" + "="*60)
-    print("STEP 1: Loading plate centroids")
+    print("STEP 1: Loading batch centroids")
     print("="*60)
-    plate_data = load_plate_centroids(args.centroids_dir)
+    batch_data = load_batch_data(
+        centroids_file=args.centroids_file,
+        centroids_dir=args.centroids_dir,
+        batch_col=args.batch_col
+    )
     
     print("\n" + "="*60)
     print("STEP 2: Parsing TOML splits")
     print("="*60)
     explicit_splits, holdout_cells, zeroshot_cells = parse_toml_splits(args.toml_file)
     
-    # Process plates (either plate-aware or global)
+    # Process batches (either batch-aware or global)
     print("\n" + "="*60)
-    if args.ignore_plate_boundaries:
-        print("STEP 3: Computing global effects (ignoring plate boundaries)")
-        print("WARNING: Experimental mode - computing mean effects across all plates")
+    if args.ignore_batch_boundaries:
+        print("STEP 3: Computing global effects (ignoring batch boundaries)")
+        print("WARNING: Experimental mode - computing mean effects across all batches")
     else:
-        print("STEP 3: Processing plates (plate-aware)")
+        print("STEP 3: Processing batches (batch-aware)")
     print("="*60)
     
-    if args.ignore_plate_boundaries:
-        # Global evaluation: compute mean effects across all plates
+    if args.ignore_batch_boundaries:
+        # Global evaluation: compute mean effects across all batches
         all_correlations = evaluate_global(
-            plate_data, explicit_splits, holdout_cells, zeroshot_cells,
+            batch_data, explicit_splits, holdout_cells, zeroshot_cells,
             args.control_pert, args.pert_col, 
             args.cell_col, args.embed_key
         )
     else:
-        # Plate-specific evaluation: process each plate separately (original behavior)
+        # Batch-specific evaluation: process each batch separately (original behavior)
         all_correlations = []
-        for plate_name, plate_adata in tqdm(plate_data.items(), desc="Processing plates"):
-            print(f"\nProcessing plate {plate_name} ({plate_adata.shape[0]} observations)...")
-            correlations = evaluate_plate(
-                plate_adata, plate_name, explicit_splits, holdout_cells, zeroshot_cells,
+        for batch_name, batch_adata in tqdm(batch_data.items(), desc="Processing batches"):
+            print(f"\nProcessing batch {batch_name} ({batch_adata.shape[0]} observations)...")
+            correlations = evaluate_batch(
+                batch_adata, batch_name, explicit_splits, holdout_cells, zeroshot_cells,
                 args.control_pert, args.pert_col, 
                 args.cell_col, args.embed_key
             )
@@ -609,7 +773,7 @@ def main():
     print(f"  N combinations: {summaries['overall']['count']}")
     
     # Print top performing cell lines
-    cell_summary = pd.DataFrame(summaries['per_cell_across_plates'])
+    cell_summary = pd.DataFrame(summaries['per_cell_across_batches'])
     if not cell_summary.empty:
         top_cells = cell_summary.nlargest(5, 'mean')[['cell_line', 'mean', 'count']]
         print("\nTop 5 cell lines by mean correlation:")
