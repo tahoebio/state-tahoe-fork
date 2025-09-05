@@ -184,6 +184,7 @@ def load_batch_data(centroids_file=None, centroids_dir=None, batch_col=None):
         """
         Decode a categorical column from H5AD obs group.
         Handles both string and categorical (codes/categories) formats.
+        Also handles double-encoded categories like b"b'value'".
         """
         column_item = obs_group[column_name]
         
@@ -198,11 +199,24 @@ def load_batch_data(centroids_file=None, centroids_dir=None, batch_col=None):
             # Categorical column with codes/categories structure
             codes = column_item['codes'][:]
             categories = column_item['categories'][:]
-            decoded_categories = np.array([
-                s.decode('utf-8') if isinstance(s, bytes) else str(s) 
-                for s in categories
-            ])
-            return decoded_categories[codes]
+            
+            decoded_categories = []
+            for cat in categories:
+                # First decode bytes to string
+                if isinstance(cat, bytes):
+                    cat_str = cat.decode('utf-8')
+                else:
+                    cat_str = str(cat)
+                
+                # Handle double-encoded format like "b'value'" -> "value"
+                if cat_str.startswith("b'") and cat_str.endswith("'"):
+                    cat_str = cat_str[2:-1]  # Remove b' and trailing '
+                elif cat_str.startswith('b"') and cat_str.endswith('"'):
+                    cat_str = cat_str[2:-1]  # Remove b" and trailing "
+                    
+                decoded_categories.append(cat_str)
+            
+            return np.array(decoded_categories)[codes]
     
     with h5py.File(centroids_file, 'r') as f:
         # Load obs metadata from HDF5 group structure
