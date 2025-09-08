@@ -392,24 +392,72 @@ def _compute_pearson_delta_impl(real, pred, real_keys, pred_keys,
     logger.info(f"Processed {processed_count} perturbation-group combinations, skipped {skipped_count}")
     logger.info(f"Found {len(perturbation_groups)} unique perturbations")
     
-    # Calculate correlations per perturbation (across all groups for that perturbation)
+    # Calculate correlations per perturbation (average across all groups for that perturbation)
+    # Also store detailed per-group results for traceability
     logger.info("Computing correlations per perturbation...")
+    detailed_correlations = []  # Store individual (perturbation, group, correlation) tuples
+    
+    for key in real_pseudobulks.keys():
+        if group_by_cols is None:
+            # Non-grouped case: key is just the perturbation name
+            perturbation = key
+            group_suffix = None
+            group_name = None
+        else:
+            # Grouped case: key is compound, parse it
+            perturbation, group_suffix = parse_compound_key(key)
+            group_name = group_suffix
+        
+        if perturbation == control_pert:
+            continue  # Skip control perturbation
+            
+        # Find matching control for this group/perturbation
+        if group_suffix:
+            control_key = f"{control_pert}::{group_suffix}"
+        else:
+            control_key = control_pert
+            
+        if control_key not in real_pseudobulks or control_key not in pred_pseudobulks:
+            continue
+            
+        # Calculate deltas within this group/perturbation
+        delta_real = real_pseudobulks[key] - real_pseudobulks[control_key]
+        delta_pred = pred_pseudobulks[key] - pred_pseudobulks[control_key]
+        
+        # Compute correlation for this specific group
+        corr, _ = pearsonr(delta_real, delta_pred)
+        if not np.isnan(corr):
+            detailed_correlations.append({
+                'perturbation': perturbation,
+                'group': group_name,
+                'pearson_delta': float(corr)
+            })
+    
+    # Now compute averages per perturbation for backward compatibility
     for perturbation, deltas in perturbation_groups.items():
         if len(deltas["real"]) == 0:
             continue
             
-        # Flatten deltas across groups for this perturbation
-        real_flat = np.concatenate(deltas["real"]) if len(deltas["real"]) > 1 else deltas["real"][0]
-        pred_flat = np.concatenate(deltas["pred"]) if len(deltas["pred"]) > 1 else deltas["pred"][0]
+        # Calculate correlation within each group, then average across groups
+        group_correlations = []
+        for real_delta, pred_delta in zip(deltas["real"], deltas["pred"]):
+            corr, _ = pearsonr(real_delta, pred_delta)
+            if not np.isnan(corr):
+                group_correlations.append(corr)
         
-        # Calculate correlation
-        correlation, _ = pearsonr(real_flat, pred_flat)
-        delta_correlations[perturbation] = float(correlation) if not np.isnan(correlation) else 0.0
+        # Average correlations across groups for this perturbation
+        if group_correlations:
+            correlation = float(np.mean(group_correlations))
+        else:
+            correlation = 0.0
+            
+        delta_correlations[perturbation] = correlation
         
-        logger.debug(f"Perturbation {perturbation}: {len(deltas['real'])} groups, correlation = {correlation:.4f}")
+        logger.debug(f"Perturbation {perturbation}: {len(deltas['real'])} groups, {len(group_correlations)} valid correlations, avg = {correlation:.4f}")
     
     logger.info(f"Computed grouped Pearson delta for {len(delta_correlations)} perturbations")
-    return delta_correlations
+    logger.info(f"Stored {len(detailed_correlations)} detailed group-level correlations")
+    return delta_correlations, detailed_correlations
 
 
 def _create_pseudobulks(matrix, compound_keys):
@@ -447,23 +495,32 @@ def _create_pseudobulks(matrix, compound_keys):
     return pseudobulks
 
 
-def save_results_csv(results_df: pl.DataFrame, agg_results_df: pl.DataFrame, outdir: str, celltype: str = None):
+def save_results_csv(results_df: pl.DataFrame, agg_results_df: pl.DataFrame, outdir: str, celltype: str = None, detailed_results: list = None):
     """Save results to CSV files matching cell-eval format."""
     if celltype:
         results_filename = f"{celltype}_results.csv"
         agg_results_filename = f"{celltype}_agg_results.csv"
+        detailed_filename = f"{celltype}_detailed_results.csv"
     else:
         results_filename = "results.csv"
         agg_results_filename = "agg_results.csv"
+        detailed_filename = "detailed_results.csv"
     
     results_path = os.path.join(outdir, results_filename)
     agg_results_path = os.path.join(outdir, agg_results_filename)
+    detailed_path = os.path.join(outdir, detailed_filename)
     
     logger.info(f"Writing perturbation level metrics to {results_path}")
     results_df.write_csv(results_path)
     
     logger.info(f"Writing aggregate metrics to {agg_results_path}")
     agg_results_df.write_csv(agg_results_path)
+    
+    # Save detailed per-group results if provided
+    if detailed_results:
+        logger.info(f"Writing detailed per-group metrics to {detailed_path}")
+        detailed_df = pl.DataFrame(detailed_results)
+        detailed_df.write_csv(detailed_path)
     
     return results_path, agg_results_path
 
@@ -630,7 +687,7 @@ def main():
                 
                 # Compute pearson_delta metric for this celltype (bypassing cell-eval preprocessing)
                 logger.info("Computing Pearson delta (optimized pseudobulking)...")
-                results = compute_pearson_delta_optimized(
+                results, detailed_results = compute_pearson_delta_optimized(
                     real_ct, pred_ct, args.pert_col, actual_control_pert, 
                     group_by_cols=args.group_by, embed_key=final_embed_key
                 )
@@ -639,7 +696,7 @@ def main():
                 results_df, agg_results_df = process_pearson_delta_results(results, ct)
                 
                 # Save CSV files for this celltype
-                save_results_csv(results_df, agg_results_df, args.outdir, ct)
+                save_results_csv(results_df, agg_results_df, args.outdir, ct, detailed_results)
                 
                 # Store aggregated results for overall average
                 all_agg_results.append(agg_results_df)
@@ -675,7 +732,7 @@ def main():
             
             # Compute pearson_delta metric (bypassing cell-eval preprocessing)
             logger.info("Computing Pearson delta (optimized pseudobulking)...")
-            results = compute_pearson_delta_optimized(
+            results, detailed_results = compute_pearson_delta_optimized(
                 real, pred, args.pert_col, actual_control_pert,
                 group_by_cols=args.group_by, embed_key=final_embed_key
             )
@@ -684,7 +741,7 @@ def main():
             results_df, agg_results_df = process_pearson_delta_results(results)
             
             # Save CSV files
-            save_results_csv(results_df, agg_results_df, args.outdir)
+            save_results_csv(results_df, agg_results_df, args.outdir, detailed_results=detailed_results)
             
             # Report overall average (single celltype case)
             mean_row = agg_results_df.filter(pl.col("statistic") == "mean")
