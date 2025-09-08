@@ -396,8 +396,12 @@ def create_output_files(input_file: Path, output_dir: Path, n_splits: int,
                         dtype=input_x.dtype
                     )
             
-            # Create obs group
-            output_f.create_group('obs')
+            # Create obs group with attributes from input
+            obs_out = output_f.create_group('obs')
+            if 'obs' in input_f:
+                # Copy obs group attributes (encoding metadata)
+                for attr_key, attr_val in input_f['obs'].attrs.items():
+                    obs_out.attrs[attr_key] = attr_val
             
             # Create obsm group if it exists in input
             if 'obsm' in input_f:
@@ -607,11 +611,19 @@ arbitrarily large H5AD files without loading them fully into memory.
                                 # Create group for categorical column
                                 cat_group = output_files[split_idx]['obs'].create_group(key)
                                 
-                                # Copy categories (same for all splits)
-                                cat_group.create_dataset('categories', data=categories)
+                                # Copy group-level attributes (encoding metadata)
+                                for attr_key, attr_val in item.attrs.items():
+                                    cat_group.attrs[attr_key] = attr_val
                                 
-                                # Copy codes for this split
-                                cat_group.create_dataset('codes', data=codes)
+                                # Copy categories (same for all splits) with attributes
+                                cat_dataset = cat_group.create_dataset('categories', data=categories)
+                                for attr_key, attr_val in item['categories'].attrs.items():
+                                    cat_dataset.attrs[attr_key] = attr_val
+                                
+                                # Copy codes for this split with attributes
+                                codes_dataset = cat_group.create_dataset('codes', data=codes)
+                                for attr_key, attr_val in item['codes'].attrs.items():
+                                    codes_dataset.attrs[attr_key] = attr_val
             
             # Copy obsm data
             if 'obsm' in input_f:

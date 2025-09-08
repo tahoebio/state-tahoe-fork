@@ -422,7 +422,7 @@ def _create_pseudobulks(matrix, compound_keys):
     n_features = matrix.shape[1]
     logger.debug(f"Building DataFrame with {n_features} feature columns...")
     df_data = {f"feature_{i}": matrix[:, i] for i in range(n_features)}
-    df_data["compound_key"] = compound_keys
+    df_data["compound_key"] = list(compound_keys)  # Convert to list to avoid polars type mixing error
     
     df = pl.DataFrame(df_data)
     
@@ -535,6 +535,11 @@ def main():
         nargs="+",
         help="Additional categorical columns to group by before calculating deltas (e.g., plate batch timepoint)",
     )
+    parser.add_argument(
+        "--use-backed",
+        action="store_true",
+        help="Use backed mode for reading H5AD files (memory efficient but may have compatibility issues)",
+    )
     
     args = parser.parse_args()
     
@@ -558,14 +563,22 @@ def main():
         if args.group_by:
             logger.info("Validating group-by columns exist in both datasets...")
             
-            # Read only obs metadata (much more memory efficient)
-            real_check = ad.read_h5ad(args.adata_real, backed='r')
-            real_obs_cols = list(real_check.obs.columns)
-            real_check.file.close()  # Close file handle to free resources
-            
-            pred_check = ad.read_h5ad(args.adata_pred, backed='r')
-            pred_obs_cols = list(pred_check.obs.columns)
-            pred_check.file.close()  # Close file handle to free resources
+            # Read metadata for validation
+            if args.use_backed:
+                real_check = ad.read_h5ad(args.adata_real, backed='r')
+                real_obs_cols = list(real_check.obs.columns)
+                real_check.file.close()  # Close file handle to free resources
+                
+                pred_check = ad.read_h5ad(args.adata_pred, backed='r')
+                pred_obs_cols = list(pred_check.obs.columns)
+                pred_check.file.close()  # Close file handle to free resources
+            else:
+                # Load full files for validation (may use more memory)
+                real_check = ad.read_h5ad(args.adata_real)
+                real_obs_cols = list(real_check.obs.columns)
+                
+                pred_check = ad.read_h5ad(args.adata_pred)
+                pred_obs_cols = list(pred_check.obs.columns)
             
             for col in args.group_by:
                 if col not in real_obs_cols:
