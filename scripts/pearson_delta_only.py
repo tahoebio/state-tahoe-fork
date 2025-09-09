@@ -1174,75 +1174,75 @@ def main():
                 load_time = time.time() - load_start
                 logger.info(f"Predicted data loaded in {load_time:.1f}s: shape {pred.shape}, memory now: {get_memory_usage():.2f} GB")
             
-            # Split by celltype (filtering will be done per celltype)
-            logger.info(f"\nSplitting datasets by {args.celltype_col}...")
-            split_start = time.time()
-            real_split = split_anndata_on_celltype(real, args.celltype_col)
-            pred_split = split_anndata_on_celltype(pred, args.celltype_col)
-            split_time = time.time() - split_start
-            logger.info(f"Split completed in {split_time:.1f}s, found {len(real_split):,} celltypes")
-            logger.info(f"Memory after splitting: {get_memory_usage():.2f} GB")
-            logger.info(f"Celltypes: {list(real_split.keys())}")
-            
-            if len(real_split) != len(pred_split):
-                raise ValueError(
-                    f"Number of celltypes in real and pred anndata must match: "
-                    f"{len(real_split)} != {len(pred_split)}"
-                )
-            
-            all_agg_results = []
-            
-            for ct in real_split.keys():
-                real_ct = real_split[ct]
-                pred_ct = pred_split[ct]
+                # Split by celltype (filtering will be done per celltype)
+                logger.info(f"\nSplitting datasets by {args.celltype_col}...")
+                split_start = time.time()
+                real_split = split_anndata_on_celltype(real, args.celltype_col)
+                pred_split = split_anndata_on_celltype(pred, args.celltype_col)
+                split_time = time.time() - split_start
+                logger.info(f"Split completed in {split_time:.1f}s, found {len(real_split):,} celltypes")
+                logger.info(f"Memory after splitting: {get_memory_usage():.2f} GB")
+                logger.info(f"Celltypes: {list(real_split.keys())}")
                 
-                # Filter to perturbations common within this cell type
-                logger.info(f"\nProcessing cell type: {ct}")
-                logger.info(f"  Shape: {real_ct.shape}, memory: {get_memory_usage():.2f} GB")
-                try:
-                    real_ct, pred_ct = filter_to_common_perturbations(
-                        real_ct, pred_ct, args.pert_col, actual_control_pert, args.group_by
+                if len(real_split) != len(pred_split):
+                    raise ValueError(
+                        f"Number of celltypes in real and pred anndata must match: "
+                        f"{len(real_split)} != {len(pred_split)}"
                     )
-                except ValueError as e:
-                    logger.warning(f"Skipping cell type {ct}: {e}")
-                    continue
                 
-                # Prepare embeddings with potentially different keys
-                final_embed_key = prepare_embeddings(
-                    real_ct, pred_ct, 
-                    embed_key_real=args.embed_key_real,
-                    embed_key_pred=args.embed_key_pred,
-                    embed_key=args.embed_key
-                )
+                all_agg_results = []
                 
-                # Compute pearson_delta metric for this celltype (bypassing cell-eval preprocessing)
-                logger.info("Computing Pearson delta (optimized pseudobulking)...")
-                results, detailed_results = compute_pearson_delta_optimized(
-                    real_ct, pred_ct, args.pert_col, actual_control_pert, 
-                    group_by_cols=args.group_by, embed_key=final_embed_key
-                )
+                for ct in real_split.keys():
+                    real_ct = real_split[ct]
+                    pred_ct = pred_split[ct]
+                    
+                    # Filter to perturbations common within this cell type
+                    logger.info(f"\nProcessing cell type: {ct}")
+                    logger.info(f"  Shape: {real_ct.shape}, memory: {get_memory_usage():.2f} GB")
+                    try:
+                        real_ct, pred_ct = filter_to_common_perturbations(
+                            real_ct, pred_ct, args.pert_col, actual_control_pert, args.group_by
+                        )
+                    except ValueError as e:
+                        logger.warning(f"Skipping cell type {ct}: {e}")
+                        continue
+                    
+                    # Prepare embeddings with potentially different keys
+                    final_embed_key = prepare_embeddings(
+                        real_ct, pred_ct, 
+                        embed_key_real=args.embed_key_real,
+                        embed_key_pred=args.embed_key_pred,
+                        embed_key=args.embed_key
+                    )
+                    
+                    # Compute pearson_delta metric for this celltype (bypassing cell-eval preprocessing)
+                    logger.info("Computing Pearson delta (optimized pseudobulking)...")
+                    results, detailed_results = compute_pearson_delta_optimized(
+                        real_ct, pred_ct, args.pert_col, actual_control_pert, 
+                        group_by_cols=args.group_by, embed_key=final_embed_key
+                    )
+                    
+                    # Process results into DataFrames
+                    results_df, agg_results_df = process_pearson_delta_results(results, ct)
+                    
+                    # Save CSV files for this celltype
+                    save_results_csv(results_df, agg_results_df, args.outdir, ct, detailed_results)
+                    
+                    # Store aggregated results for overall average
+                    all_agg_results.append(agg_results_df)
                 
-                # Process results into DataFrames
-                results_df, agg_results_df = process_pearson_delta_results(results, ct)
-                
-                # Save CSV files for this celltype
-                save_results_csv(results_df, agg_results_df, args.outdir, ct, detailed_results)
-                
-                # Store aggregated results for overall average
-                all_agg_results.append(agg_results_df)
-            
-            # Compute overall average across all celltypes
-            if all_agg_results:
-                # Combine all agg results and compute overall mean
-                overall_scores = []
-                for agg_df in all_agg_results:
-                    mean_row = agg_df.filter(pl.col("statistic") == "mean")
-                    if len(mean_row) > 0:
-                        overall_scores.append(float(mean_row.select("pearson_delta").item()))
-                
-                if overall_scores:
-                    overall_mean = sum(overall_scores) / len(overall_scores)
-                    logger.info(f"Overall Pearson Delta correlation across all celltypes: {overall_mean:.4f}")
+                # Compute overall average across all celltypes
+                if all_agg_results:
+                    # Combine all agg results and compute overall mean
+                    overall_scores = []
+                    for agg_df in all_agg_results:
+                        mean_row = agg_df.filter(pl.col("statistic") == "mean")
+                        if len(mean_row) > 0:
+                            overall_scores.append(float(mean_row.select("pearson_delta").item()))
+                    
+                    if overall_scores:
+                        overall_mean = sum(overall_scores) / len(overall_scores)
+                        logger.info(f"Overall Pearson Delta correlation across all celltypes: {overall_mean:.4f}")
             
         else:
             # Check if we're using group-by with backed mode for memory efficiency
