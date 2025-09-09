@@ -9,6 +9,8 @@ import sys
 import os
 import json
 from pathlib import Path
+import psutil
+import time
 
 # Add the src directory to the path so we can import cell_eval
 sys.path.insert(0, str(Path(__file__).parent / "src"))
@@ -18,6 +20,11 @@ import numpy as np
 import anndata as ad
 import polars as pl
 from cell_eval.utils import split_anndata_on_celltype
+
+def get_memory_usage():
+    """Get current memory usage in GB."""
+    process = psutil.Process()
+    return process.memory_info().rss / 1024 / 1024 / 1024
 
 # Set up logging with timestamps - force reconfigure
 logging.basicConfig(
@@ -100,16 +107,16 @@ def _filter_to_common_perturbations_simple(real, pred, pert_col, control_pert):
     if control_pert not in common_perts:
         raise ValueError(f"Control perturbation '{control_pert}' not found in both datasets")
     
-    logger.info(f"Real dataset has {len(perts_real)} perturbations")
-    logger.info(f"Pred dataset has {len(perts_pred)} perturbations") 
-    logger.info(f"Common perturbations: {len(common_perts)}")
+    logger.info(f"Real dataset has {len(perts_real):,} perturbations")
+    logger.info(f"Pred dataset has {len(perts_pred):,} perturbations") 
+    logger.info(f"Common perturbations: {len(common_perts):,}")
     
     # Filter datasets to common perturbations
     real_filtered = real[real.obs[pert_col].isin(common_perts)].copy()
     pred_filtered = pred[pred.obs[pert_col].isin(common_perts)].copy()
     
-    logger.info(f"Filtered real dataset: {real_filtered.shape[0]} cells")
-    logger.info(f"Filtered pred dataset: {pred_filtered.shape[0]} cells")
+    logger.info(f"Filtered real dataset: {real_filtered.shape[0]:,} cells")
+    logger.info(f"Filtered pred dataset: {pred_filtered.shape[0]:,} cells")
     
     return real_filtered, pred_filtered
 
@@ -117,10 +124,10 @@ def _filter_to_common_perturbations_simple(real, pred, pert_col, control_pert):
 def _filter_to_common_compound_keys(real, pred, pert_col, control_pert, group_by_cols):
     """Filter datasets and return compound keys separately to avoid unnecessary copying."""
     
-    logger.info(f"Creating compound keys for {real.shape[0]} real cells...")
+    logger.info(f"Creating compound keys for {real.shape[0]:,} real cells...")
     real_compound_keys = create_compound_grouping_key(real, pert_col, group_by_cols)
     
-    logger.info(f"Creating compound keys for {pred.shape[0]} pred cells...")
+    logger.info(f"Creating compound keys for {pred.shape[0]:,} pred cells...")
     pred_compound_keys = create_compound_grouping_key(pred, pert_col, group_by_cols)
     
     logger.info("Finding common compound keys...")
@@ -137,18 +144,18 @@ def _filter_to_common_compound_keys(real, pred, pert_col, control_pert, group_by
         if control_pert not in common_keys:
             raise ValueError(f"No control perturbation '{control_pert}' groups found in both datasets")
     
-    logger.info(f"Real dataset has {len(keys_real)} perturbation-group combinations")
-    logger.info(f"Pred dataset has {len(keys_pred)} perturbation-group combinations") 
-    logger.info(f"Common combinations: {len(common_keys)}")
-    logger.info(f"Control groups in common: {len(control_keys)}")
+    logger.info(f"Real dataset has {len(keys_real):,} perturbation-group combinations")
+    logger.info(f"Pred dataset has {len(keys_pred):,} perturbation-group combinations") 
+    logger.info(f"Common combinations: {len(common_keys):,}")
+    logger.info(f"Control groups in common: {len(control_keys):,}")
     
     # Create boolean masks directly (no copying!)
     logger.info("Creating filtering masks...")
     real_mask = real_compound_keys.isin(common_keys)
     pred_mask = pred_compound_keys.isin(common_keys)
     
-    logger.info(f"Real mask filters to {real_mask.sum()} cells")
-    logger.info(f"Pred mask filters to {pred_mask.sum()} cells")
+    logger.info(f"Real mask filters to {real_mask.sum():,} cells")
+    logger.info(f"Pred mask filters to {pred_mask.sum():,} cells")
     
     # Filter data using views (not copies)
     logger.info("Filtering datasets to common combinations...")
@@ -159,8 +166,8 @@ def _filter_to_common_compound_keys(real, pred, pert_col, control_pert, group_by
     real_keys_filtered = real_compound_keys[real_mask]
     pred_keys_filtered = pred_compound_keys[pred_mask]
     
-    logger.info(f"Filtered real dataset: {real_filtered.shape[0]} cells")
-    logger.info(f"Filtered pred dataset: {pred_filtered.shape[0]} cells")
+    logger.info(f"Filtered real dataset: {real_filtered.shape[0]:,} cells")
+    logger.info(f"Filtered pred dataset: {pred_filtered.shape[0]:,} cells")
     
     # Return filtered data AND compound keys separately
     return real_filtered, pred_filtered, real_keys_filtered, pred_keys_filtered
@@ -311,9 +318,9 @@ def _compute_pearson_delta_impl(real, pred, real_keys, pred_keys,
     from scipy.stats import pearsonr
     
     if group_by_cols is None:
-        logger.info(f"Starting delta computation for {len(real_keys.unique())} unique perturbations...")
+        logger.info(f"Starting delta computation for {len(real_keys.unique()):,} unique perturbations...")
     else:
-        logger.info(f"Starting delta computation for {len(real_keys.unique())} unique groups...")
+        logger.info(f"Starting delta computation for {len(real_keys.unique()):,} unique groups...")
     
     # Get data matrix
     logger.info("Extracting data matrices...")
@@ -338,7 +345,7 @@ def _compute_pearson_delta_impl(real, pred, real_keys, pred_keys,
     logger.info("Creating pseudobulks for predicted data...")
     pred_pseudobulks, pred_cell_counts = _create_pseudobulks(pred_matrix, pred_keys.values)
     
-    logger.info(f"Created {len(real_pseudobulks)} real pseudobulks and {len(pred_pseudobulks)} pred pseudobulks")
+    logger.info(f"Created {len(real_pseudobulks):,} real pseudobulks and {len(pred_pseudobulks):,} pred pseudobulks")
     
     # Calculate deltas within groups
     logger.info("Computing deltas within groups...")
@@ -389,8 +396,8 @@ def _compute_pearson_delta_impl(real, pred, real_keys, pred_keys,
         deltas_pred_all.append(delta_pred)
         processed_count += 1
     
-    logger.info(f"Processed {processed_count} perturbation-group combinations, skipped {skipped_count}")
-    logger.info(f"Found {len(perturbation_groups)} unique perturbations")
+    logger.info(f"Processed {processed_count:,} perturbation-group combinations, skipped {skipped_count:,}")
+    logger.info(f"Found {len(perturbation_groups):,} unique perturbations")
     
     # Calculate correlations per perturbation (average across all groups for that perturbation)
     # Also store detailed per-group results for traceability
@@ -455,10 +462,10 @@ def _compute_pearson_delta_impl(real, pred, real_keys, pred_keys,
             
         delta_correlations[perturbation] = correlation
         
-        logger.debug(f"Perturbation {perturbation}: {len(deltas['real'])} groups, {len(group_correlations)} valid correlations, avg = {correlation:.4f}")
+        logger.debug(f"Perturbation {perturbation}: {len(deltas['real']):,} groups, {len(group_correlations):,} valid correlations, avg = {correlation:.4f}")
     
-    logger.info(f"Computed grouped Pearson delta for {len(delta_correlations)} perturbations")
-    logger.info(f"Stored {len(detailed_correlations)} detailed group-level correlations")
+    logger.info(f"Computed grouped Pearson delta for {len(delta_correlations):,} perturbations")
+    logger.info(f"Stored {len(detailed_correlations):,} detailed group-level correlations")
     return delta_correlations, detailed_correlations
 
 
@@ -472,11 +479,11 @@ def _create_pseudobulks(matrix, compound_keys):
     """
     import polars as pl
     
-    logger.debug(f"Creating pseudobulks from {matrix.shape[0]} cells x {matrix.shape[1]} features")
+    logger.debug(f"Creating pseudobulks from {matrix.shape[0]:,} cells x {matrix.shape[1]:,} features")
     
     # Create DataFrame with compound keys
     n_features = matrix.shape[1]
-    logger.debug(f"Building DataFrame with {n_features} feature columns...")
+    logger.debug(f"Building DataFrame with {n_features:,} feature columns...")
     df_data = {f"feature_{i}": matrix[:, i] for i in range(n_features)}
     df_data["compound_key"] = list(compound_keys)  # Convert to list to avoid polars type mixing error
     
@@ -491,7 +498,7 @@ def _create_pseudobulks(matrix, compound_keys):
         pl.col("compound_key").count().alias("cell_count")
     ])
     
-    logger.debug(f"Created {len(pseudobulks_df)} pseudobulk groups")
+    logger.debug(f"Created {len(pseudobulks_df):,} pseudobulk groups")
     
     # Convert back to dictionary of arrays and separate cell counts
     logger.debug("Converting to dictionary format...")
@@ -503,7 +510,7 @@ def _create_pseudobulks(matrix, compound_keys):
         pseudobulks[key] = values
         cell_counts[key] = row["cell_count"]
     
-    logger.debug(f"Pseudobulking completed: {len(pseudobulks)} groups")
+    logger.debug(f"Pseudobulking completed: {len(pseudobulks):,} groups")
     return pseudobulks, cell_counts
 
 
@@ -535,6 +542,357 @@ def save_results_csv(results_df: pl.DataFrame, agg_results_df: pl.DataFrame, out
         detailed_df.write_csv(detailed_path)
     
     return results_path, agg_results_path
+
+
+def load_celltype_group_data(h5ad_path, celltype_col, celltype_value, group_col, group_value, embed_key=None):
+    """Load only data for a specific celltype AND group combination using AnnData backed mode.
+    
+    Args:
+        h5ad_path: Path to H5AD file
+        celltype_col: Column name for celltype (e.g., 'cell_line_id')
+        celltype_value: Celltype to filter for
+        group_col: Column name for group (e.g., 'plate')
+        group_value: Group to filter for
+        embed_key: Optional embedding key to load from obsm
+        
+    Returns:
+        AnnData object with only the specified celltype-group combination
+    """
+    start_time = time.time()
+    initial_memory = get_memory_usage()
+    logger.info(f"    Loading {celltype_col}={celltype_value}, {group_col}={group_value}")
+    logger.info(f"    Initial memory: {initial_memory:.2f} GB")
+    
+    # Open in backed mode to access obs without loading full data
+    logger.info(f"    Opening {os.path.basename(h5ad_path)} in backed mode...")
+    adata_backed = ad.read_h5ad(h5ad_path, backed='r')
+    
+    # Find cells matching both celltype and group
+    logger.info(f"    Filtering cells...")
+    mask = (adata_backed.obs[celltype_col] == celltype_value) & (adata_backed.obs[group_col] == group_value)
+    matching_indices = np.where(mask)[0]
+    
+    if len(matching_indices) == 0:
+        logger.info(f"    No cells found for this combination")
+        adata_backed.file.close()
+        return None
+    
+    logger.info(f"    Found {len(matching_indices):,} matching cells ({len(matching_indices)/adata_backed.n_obs*100:.1f}% of total)")
+    
+    # Load only the subset of data we need - this creates a view, then copy loads only those rows
+    logger.info(f"    Loading subset data...")
+    subset_start = time.time()
+    
+    # Create subset view, then load only specific rows into memory
+    adata_subset = adata_backed[mask, :].to_memory()
+    
+    subset_time = time.time() - subset_start
+    subset_memory = get_memory_usage()
+    
+    # Close the backed file
+    adata_backed.file.close()
+    
+    logger.info(f"    Subset loaded in {subset_time:.1f}s")
+    logger.info(f"    Final shape: {adata_subset.shape}")
+    logger.info(f"    Memory after loading: {subset_memory:.2f} GB (+{subset_memory-initial_memory:.2f} GB)")
+    
+    return adata_subset
+
+
+def load_group_data(h5ad_path, group_name, group_value, embed_key=None):
+    """Load only the data for a specific group from an H5AD file.
+    
+    Uses h5py to read only the necessary indices, avoiding loading the full dataset.
+    
+    Args:
+        h5ad_path: Path to H5AD file
+        group_name: Column name to filter by (e.g., 'plate')
+        group_value: Value to filter for (e.g., 'plate1')
+        embed_key: Optional embedding key to load from obsm
+        
+    Returns:
+        AnnData object with only the specified group's data
+    """
+    import h5py
+    import pandas as pd
+    from scipy import sparse
+    
+    start_time = time.time()
+    initial_memory = get_memory_usage()
+    logger.info(f"Loading {group_name}={group_value} from {os.path.basename(h5ad_path)}...")
+    logger.info(f"Initial memory usage: {initial_memory:.2f} GB")
+    
+    with h5py.File(h5ad_path, 'r') as f:
+        # Log file structure
+        logger.info(f"H5AD structure - obs keys: {list(f['obs'].keys())[:5]}...")
+        if 'obsm' in f:
+            logger.info(f"H5AD structure - obsm keys: {list(f['obsm'].keys())}")
+        
+        # Read obs to find indices for this group
+        logger.info(f"Reading obs metadata to identify {group_name}={group_value} cells...")
+        obs_start = time.time()
+        obs = pd.DataFrame()
+        
+        obs_group = f['obs']
+        
+        # Get total cells count safely
+        first_key = None
+        for key in obs_group.keys():
+            if key != '__categories':
+                first_key = key
+                break
+        
+        total_cells = obs_group[first_key].shape[0] if first_key else 0
+        logger.info(f"Total cells in file: {total_cells:,}")
+        
+        # Check if categories exist
+        has_categories = '__categories' in obs_group
+        categories_group = obs_group.get('__categories') if has_categories else None
+        
+        # Read all obs columns
+        for key in obs_group.keys():
+            if key == '__categories':
+                continue
+            
+            # Check if this is a categorical column
+            if has_categories and categories_group is not None and key in categories_group:
+                # Categorical column
+                logger.debug(f"  Reading categorical column: {key}")
+                codes = obs_group[key][()]
+                categories = categories_group[key][()]
+                obs[key] = pd.Categorical.from_codes(codes, categories.astype(str))
+            else:
+                # Regular column  
+                logger.debug(f"  Reading regular column: {key}")
+                data = obs_group[key][()]  # dataset - use [()] to read all data
+                obs[key] = data
+        
+        obs_time = time.time() - obs_start
+        obs_memory = get_memory_usage()
+        logger.info(f"Obs loaded in {obs_time:.1f}s, memory now: {obs_memory:.2f} GB (+{obs_memory-initial_memory:.2f} GB)")
+        
+        # Find indices for this group
+        logger.info(f"Filtering to {group_name}={group_value}...")
+        group_mask = obs[group_name] == group_value
+        group_indices = np.where(group_mask)[0]
+        
+        if len(group_indices) == 0:
+            logger.warning(f"No cells found for {group_name}={group_value}")
+            return None
+        
+        logger.info(f"Found {len(group_indices):,} cells for {group_name}={group_value} ({len(group_indices)/total_cells*100:.1f}% of total)")
+        
+        # Read var
+        logger.info("Reading var (gene/feature) metadata...")
+        var_start = time.time()
+        var = pd.DataFrame()
+        if 'var' in f:
+            var_group = f['var']
+            
+            # Get feature count safely
+            first_var_key = None
+            for key in var_group.keys():
+                if key != '__categories':
+                    first_var_key = key
+                    break
+            
+            n_vars = var_group[first_var_key].shape[0] if first_var_key else 0
+            logger.info(f"Number of features: {n_vars:,}")
+            
+            # Check if var categories exist
+            has_var_categories = '__categories' in var_group
+            var_categories_group = var_group.get('__categories') if has_var_categories else None
+            
+            # Read all var columns
+            for key in var_group.keys():
+                if key == '__categories':
+                    continue
+                
+                # Check if this is a categorical column
+                if has_var_categories and var_categories_group is not None and key in var_categories_group:
+                    # Categorical column
+                    codes = var_group[key][()]
+                    categories = var_categories_group[key][()]
+                    var[key] = pd.Categorical.from_codes(codes, categories.astype(str))
+                else:
+                    # Regular column
+                    data = var_group[key][()]  # dataset - use [()] to read all data
+                    var[key] = data
+        
+        var_time = time.time() - var_start
+        var_memory = get_memory_usage()
+        logger.info(f"Var loaded in {var_time:.1f}s, memory now: {var_memory:.2f} GB (+{var_memory-obs_memory:.2f} GB)")
+        
+        # Read X matrix for selected indices
+        X = None
+        if 'X' in f:
+            x_start = time.time()
+            if isinstance(f['X'], h5py.Group):
+                # Sparse matrix - extract only rows we need
+                logger.info("Loading sparse X matrix (CSR format)...")
+                
+                # Get sparse matrix metadata
+                shape = tuple(f['X'].attrs['shape'])
+                logger.info(f"  Original matrix shape: {shape}")
+                logger.info(f"  Extracting {len(group_indices):,} rows...")
+                
+                # Read indptr to understand row structure
+                indptr = f['X']['indptr'][()]
+                logger.info(f"  Read indptr array (size: {len(indptr):,})")
+                
+                # Calculate which data elements we need for our selected rows
+                row_starts = []
+                row_ends = []
+                for idx in group_indices:
+                    row_starts.append(indptr[idx])
+                    row_ends.append(indptr[idx + 1])
+                
+                # Create mapping of old data indices to new
+                data_indices_needed = []
+                for start, end in zip(row_starts, row_ends):
+                    data_indices_needed.extend(range(start, end))
+                
+                data_indices_needed = np.array(data_indices_needed)
+                logger.info(f"  Need {len(data_indices_needed):,} non-zero values from {f['X']['data'].size:,} total")
+                
+                # Read only the data and indices we need
+                if len(data_indices_needed) > 0:
+                    data_subset = f['X']['data'][data_indices_needed]
+                    indices_subset = f['X']['indices'][data_indices_needed]
+                else:
+                    data_subset = np.array([])
+                    indices_subset = np.array([])
+                
+                # Build new indptr for subset matrix
+                new_indptr = [0]
+                for start, end in zip(row_starts, row_ends):
+                    new_indptr.append(new_indptr[-1] + (end - start))
+                new_indptr = np.array(new_indptr)
+                
+                # Create sparse matrix with only selected rows
+                sparse_memory_before = get_memory_usage()
+                X = sparse.csr_matrix(
+                    (data_subset, indices_subset, new_indptr), 
+                    shape=(len(group_indices), shape[1])
+                )
+                sparse_memory_after = get_memory_usage()
+                
+                logger.info(f"  Sparse subset matrix created: shape {X.shape}, {X.nnz:,} non-zero values")
+                logger.info(f"  Memory used for sparse matrix: {sparse_memory_after:.2f} GB (+{sparse_memory_after-sparse_memory_before:.2f} GB)")
+            else:
+                # Dense matrix - read only needed rows
+                logger.info(f"Loading dense X matrix (selecting {len(group_indices):,} rows)...")
+                X = f['X'][group_indices, :]
+            
+            x_time = time.time() - x_start
+            x_memory = get_memory_usage()
+            logger.info(f"X matrix loaded in {x_time:.1f}s, memory now: {x_memory:.2f} GB (+{x_memory-var_memory:.2f} GB)")
+        
+        # Read obsm embeddings if specified
+        obsm = {}
+        if embed_key and 'obsm' in f and embed_key in f['obsm']:
+            obsm_start = time.time()
+            embed_shape = f['obsm'][embed_key].shape
+            logger.info(f"Loading embedding '{embed_key}' with shape {embed_shape}...")
+            logger.info(f"  Selecting {len(group_indices):,} rows from embedding...")
+            
+            obsm[embed_key] = f['obsm'][embed_key][group_indices, :]
+            
+            obsm_time = time.time() - obsm_start
+            obsm_memory = get_memory_usage()
+            logger.info(f"Embedding loaded in {obsm_time:.1f}s, memory now: {obsm_memory:.2f} GB (+{obsm_memory-x_memory:.2f} GB)")
+        
+        # Create filtered obs
+        logger.info("Creating filtered obs dataframe...")
+        obs_filtered = obs.iloc[group_indices].reset_index(drop=True)
+        
+    # Create AnnData object
+    logger.info("Creating AnnData object...")
+    adata_start = time.time()
+    adata = ad.AnnData(X=X, obs=obs_filtered, var=var)
+    if obsm:
+        adata.obsm = obsm
+    
+    adata_time = time.time() - adata_start
+    final_memory = get_memory_usage()
+    total_time = time.time() - start_time
+    
+    logger.info(f"AnnData created in {adata_time:.1f}s")
+    logger.info(f"Total loading time: {total_time:.1f}s")
+    logger.info(f"Final memory usage: {final_memory:.2f} GB (total increase: {final_memory-initial_memory:.2f} GB)")
+    logger.info(f"Loaded AnnData shape: {adata.shape}")
+    
+    return adata
+
+def process_group_separately(args, group_name, group_value, all_detailed_results):
+    """Process a single group to minimize memory usage.
+    
+    Args:
+        args: Command line arguments
+        group_name: Name of the grouping column (e.g., 'plate')
+        group_value: Value to filter for (e.g., 'plate1')
+        all_detailed_results: List to accumulate detailed results across groups
+        
+    Returns:
+        dict: Aggregated results for this group
+    """
+    logger.info(f"\n{'='*60}")
+    logger.info(f"Processing group: {group_name} = {group_value}")
+    logger.info(f"{'='*60}")
+    
+    # Map control perturbation
+    actual_control_pert = map_control_perturbation(args.control_pert)
+    
+    # Determine which embedding keys to load
+    real_key = args.embed_key_real or args.embed_key
+    pred_key = args.embed_key_pred or args.embed_key
+    
+    # Load only this group's data using h5py
+    real_group = load_group_data(args.adata_real, group_name, group_value, real_key)
+    pred_group = load_group_data(args.adata_pred, group_name, group_value, pred_key)
+    
+    if real_group is None or pred_group is None:
+        logger.warning(f"Skipping group {group_value}: no data found")
+        return None
+    
+    logger.info(f"Group {group_value}: {real_group.shape[0]:,} real cells, {pred_group.shape[0]:,} pred cells")
+    
+    # Check if control exists in this group
+    if actual_control_pert not in real_group.obs[args.pert_col].unique():
+        logger.warning(f"Skipping group {group_value}: no control perturbation '{actual_control_pert}'")
+        return None
+    
+    # Filter to common perturbations within this group
+    real_group, pred_group = filter_to_common_perturbations(
+        real_group, pred_group, args.pert_col, actual_control_pert, None  # No nested grouping
+    )
+    
+    # Prepare embeddings
+    final_embed_key = prepare_embeddings(
+        real_group, pred_group,
+        embed_key_real=args.embed_key_real,
+        embed_key_pred=args.embed_key_pred,
+        embed_key=args.embed_key
+    )
+    
+    # Compute pearson_delta for this group
+    logger.info(f"Computing Pearson delta for group {group_value}...")
+    results, detailed_results = compute_pearson_delta_optimized(
+        real_group, pred_group, args.pert_col, actual_control_pert,
+        group_by_cols=None,  # Already filtered to group
+        embed_key=final_embed_key
+    )
+    
+    # Add group information to detailed results
+    for detail in detailed_results:
+        detail['group_name'] = group_name
+        detail['group_value'] = group_value
+        all_detailed_results.append(detail)
+    
+    # Free memory
+    del real_group, pred_group
+    
+    return results
 
 
 def main():
@@ -659,13 +1017,172 @@ def main():
         
         # Handle celltype splitting if specified
         if args.celltype_col is not None:
-            # Load the full datasets
-            real = ad.read_h5ad(args.adata_real)
-            pred = ad.read_h5ad(args.adata_pred)
+            logger.info("\n" + "="*60)
+            logger.info(f"Processing with celltype splitting (column: {args.celltype_col})")
+            
+            # Check if we should use memory-efficient mode
+            if args.group_by and len(args.group_by) == 1 and args.use_backed:
+                # Memory-efficient mode for celltype + group-by
+                logger.info(f"✓ MEMORY-EFFICIENT MODE: Processing each {args.group_by[0]} within each celltype separately")
+                logger.info(f"Initial memory usage: {get_memory_usage():.2f} GB")
+                
+                # First, get unique celltypes and groups using backed mode
+                logger.info(f"\nIdentifying unique celltypes and {args.group_by[0]} values...")
+                real_backed = ad.read_h5ad(args.adata_real, backed='r')
+                unique_celltypes = real_backed.obs[args.celltype_col].unique()
+                unique_groups = real_backed.obs[args.group_by[0]].unique()
+                real_backed.file.close()
+                
+                logger.info(f"Found {len(unique_celltypes):,} celltypes: {sorted(unique_celltypes)}")
+                logger.info(f"Found {len(unique_groups):,} {args.group_by[0]} values: {sorted(unique_groups)}")
+                
+                # Process each celltype-group combination separately
+                all_results_by_celltype = {}
+                
+                for ct in sorted(unique_celltypes):
+                    logger.info(f"\n{'='*60}")
+                    logger.info(f"Processing celltype: {ct}")
+                    ct_results = {}
+                    ct_detailed = []
+                    
+                    for group_value in sorted(unique_groups):
+                        logger.info(f"\n  Processing {args.group_by[0]}={group_value} for celltype {ct}...")
+                        
+                        # Load only this celltype-group combination
+                        real_subset = load_celltype_group_data(
+                            args.adata_real, args.celltype_col, ct, 
+                            args.group_by[0], group_value,
+                            embed_key=args.embed_key_real or args.embed_key
+                        )
+                        pred_subset = load_celltype_group_data(
+                            args.adata_pred, args.celltype_col, ct,
+                            args.group_by[0], group_value,
+                            embed_key=args.embed_key_pred or args.embed_key
+                        )
+                        
+                        if real_subset is None or pred_subset is None:
+                            logger.warning(f"    Skipping: no data found")
+                            continue
+                            
+                        logger.info(f"    Loaded {real_subset.shape[0]:,} real cells, {pred_subset.shape[0]:,} pred cells")
+                        
+                        # Process this subset immediately
+                        logger.info(f"    Processing Pearson delta for this subset...")
+                        
+                        # Filter to common perturbations within this subset
+                        try:
+                            real_subset, pred_subset = filter_to_common_perturbations(
+                                real_subset, pred_subset, args.pert_col, actual_control_pert, None  # No nested grouping
+                            )
+                        except ValueError as e:
+                            logger.warning(f"    Skipping: {e}")
+                            # Free memory before continuing
+                            del real_subset, pred_subset
+                            continue
+                        
+                        # Prepare embeddings
+                        final_embed_key = prepare_embeddings(
+                            real_subset, pred_subset,
+                            embed_key_real=args.embed_key_real,
+                            embed_key_pred=args.embed_key_pred,
+                            embed_key=args.embed_key
+                        )
+                        
+                        # Compute pearson_delta for this subset
+                        subset_results, subset_detailed = compute_pearson_delta_optimized(
+                            real_subset, pred_subset, args.pert_col, actual_control_pert,
+                            group_by_cols=None,  # Already filtered to celltype-group
+                            embed_key=final_embed_key
+                        )
+                        
+                        # Accumulate results for this celltype
+                        for pert, score in subset_results.items():
+                            if pert not in ct_results:
+                                ct_results[pert] = []
+                            ct_results[pert].append(score)
+                        
+                        # Add celltype and group info to detailed results
+                        for detail in subset_detailed:
+                            detail['celltype'] = ct
+                            detail['group_name'] = args.group_by[0]
+                            detail['group_value'] = group_value
+                            ct_detailed.append(detail)
+                        
+                        # Free memory immediately after processing
+                        del real_subset, pred_subset
+                        logger.info(f"    Subset processed and freed, memory: {get_memory_usage():.2f} GB")
+                
+                # Average results across groups for this celltype
+                logger.info(f"\nAveraging results across {args.group_by[0]} groups for celltype {ct}...")
+                ct_final_results = {}
+                for pert, scores in ct_results.items():
+                    ct_final_results[pert] = float(np.mean(scores))
+                    logger.debug(f"  {pert}: {len(scores):,} groups, avg = {ct_final_results[pert]:.4f}")
+                
+                # Store results for this celltype
+                all_results_by_celltype[ct] = (ct_final_results, ct_detailed)
+                logger.info(f"Celltype {ct} completed: {len(ct_final_results):,} perturbations, {len(ct_detailed):,} detailed results")
+                
+            # Final output processing and file saving
+            logger.info(f"\n{'='*60}")
+            logger.info("Processing final results across all celltypes...")
+            
+            all_agg_results = []
+            
+            for ct, (ct_results, ct_detailed) in all_results_by_celltype.items():
+                logger.info(f"\nProcessing results for celltype: {ct}")
+                
+                # Process results into DataFrames
+                results_df, agg_results_df = process_pearson_delta_results(ct_results, ct)
+                
+                # Save CSV files for this celltype
+                save_results_csv(results_df, agg_results_df, args.outdir, ct, ct_detailed)
+                
+                # Store aggregated results for overall average
+                all_agg_results.append(agg_results_df)
+                
+                logger.info(f"Saved results for celltype {ct}: {len(ct_results):,} perturbations")
+            
+            # Compute overall average across all celltypes
+            if all_agg_results:
+                logger.info(f"\nComputing overall average across {len(all_agg_results):,} celltypes...")
+                overall_scores = []
+                for agg_df in all_agg_results:
+                    mean_row = agg_df.filter(pl.col("statistic") == "mean")
+                    if len(mean_row) > 0:
+                        overall_scores.append(float(mean_row.select("pearson_delta").item()))
+                
+                if overall_scores:
+                    overall_mean = sum(overall_scores) / len(overall_scores)
+                    logger.info(f"Overall Pearson Delta correlation across all celltypes: {overall_mean:.4f}")
+                    
+            else:
+                # Original behavior: load full datasets
+                logger.info("⚠️  FULL DATASET MODE: Loading entire datasets into memory")
+                logger.info("This will use significant memory with celltype splitting.")
+                logger.info(f"Memory before loading: {get_memory_usage():.2f} GB")
+                
+                logger.info(f"\nLoading real data from {args.adata_real}...")
+                load_start = time.time()
+                real = ad.read_h5ad(args.adata_real)
+                load_time = time.time() - load_start
+                logger.info(f"Real data loaded in {load_time:.1f}s: shape {real.shape}, memory now: {get_memory_usage():.2f} GB")
+                
+                logger.info(f"\nLoading predicted data from {args.adata_pred}...")
+                load_start = time.time()
+                pred = ad.read_h5ad(args.adata_pred)
+                load_time = time.time() - load_start
+                logger.info(f"Predicted data loaded in {load_time:.1f}s: shape {pred.shape}, memory now: {get_memory_usage():.2f} GB")
             
             # Split by celltype (filtering will be done per celltype)
+            logger.info(f"\nSplitting datasets by {args.celltype_col}...")
+            split_start = time.time()
             real_split = split_anndata_on_celltype(real, args.celltype_col)
             pred_split = split_anndata_on_celltype(pred, args.celltype_col)
+            split_time = time.time() - split_start
+            logger.info(f"Split completed in {split_time:.1f}s, found {len(real_split):,} celltypes")
+            logger.info(f"Memory after splitting: {get_memory_usage():.2f} GB")
+            logger.info(f"Celltypes: {list(real_split.keys())}")
             
             if len(real_split) != len(pred_split):
                 raise ValueError(
@@ -680,7 +1197,8 @@ def main():
                 pred_ct = pred_split[ct]
                 
                 # Filter to perturbations common within this cell type
-                logger.info(f"Processing cell type: {ct}")
+                logger.info(f"\nProcessing cell type: {ct}")
+                logger.info(f"  Shape: {real_ct.shape}, memory: {get_memory_usage():.2f} GB")
                 try:
                     real_ct, pred_ct = filter_to_common_perturbations(
                         real_ct, pred_ct, args.pert_col, actual_control_pert, args.group_by
@@ -727,39 +1245,99 @@ def main():
                     logger.info(f"Overall Pearson Delta correlation across all celltypes: {overall_mean:.4f}")
             
         else:
-            # Original behavior: process all data together (no celltype splitting)
-            real = ad.read_h5ad(args.adata_real)
-            pred = ad.read_h5ad(args.adata_pred)
-            
-            # Filter to common perturbations
-            real, pred = filter_to_common_perturbations(real, pred, args.pert_col, actual_control_pert, args.group_by)
-            
-            # Prepare embeddings with potentially different keys
-            final_embed_key = prepare_embeddings(
-                real, pred,
-                embed_key_real=args.embed_key_real,
-                embed_key_pred=args.embed_key_pred,
-                embed_key=args.embed_key
-            )
-            
-            # Compute pearson_delta metric (bypassing cell-eval preprocessing)
-            logger.info("Computing Pearson delta (optimized pseudobulking)...")
-            results, detailed_results = compute_pearson_delta_optimized(
-                real, pred, args.pert_col, actual_control_pert,
-                group_by_cols=args.group_by, embed_key=final_embed_key
-            )
-            
-            # Process results into DataFrames
-            results_df, agg_results_df = process_pearson_delta_results(results)
-            
-            # Save CSV files
-            save_results_csv(results_df, agg_results_df, args.outdir, detailed_results=detailed_results)
-            
-            # Report overall average (single celltype case)
-            mean_row = agg_results_df.filter(pl.col("statistic") == "mean")
-            if len(mean_row) > 0:
-                overall_mean = float(mean_row.select("pearson_delta").item())
-                logger.info(f"Overall Pearson Delta correlation: {overall_mean:.4f}")
+            # Check if we're using group-by with backed mode for memory efficiency
+            if args.group_by and len(args.group_by) == 1 and args.use_backed:
+                # Memory-efficient mode: process each group separately
+                group_col = args.group_by[0]
+                logger.info(f"\nMemory-efficient mode: Processing each {group_col} separately")
+                logger.info(f"Initial memory usage: {get_memory_usage():.2f} GB")
+                
+                # Get unique group values using backed mode
+                logger.info(f"Identifying unique {group_col} values from {args.adata_real}...")
+                initial_mem = get_memory_usage()
+                
+                real_backed = ad.read_h5ad(args.adata_real, backed='r')
+                logger.info(f"Backed file opened, memory: {get_memory_usage():.2f} GB (+{get_memory_usage()-initial_mem:.2f} GB)")
+                
+                logger.info(f"Reading {group_col} column from obs...")
+                unique_groups = real_backed.obs[group_col].unique()
+                logger.info(f"Found unique values, memory: {get_memory_usage():.2f} GB")
+                
+                real_backed.file.close()
+                logger.info(f"Backed file closed, memory: {get_memory_usage():.2f} GB")
+                
+                logger.info(f"Found {len(unique_groups):,} unique {group_col} values: {sorted(unique_groups)}")
+                
+                # Process each group separately
+                all_results = {}
+                all_detailed_results = []
+                
+                for group_value in sorted(unique_groups):
+                    group_results = process_group_separately(
+                        args, group_col, group_value, all_detailed_results
+                    )
+                    
+                    if group_results:
+                        # Aggregate results across groups
+                        for pert, score in group_results.items():
+                            if pert not in all_results:
+                                all_results[pert] = []
+                            all_results[pert].append(score)
+                
+                # Average results across groups
+                logger.info("\n" + "="*60)
+                logger.info("Aggregating results across all groups...")
+                final_results = {}
+                for pert, scores in all_results.items():
+                    final_results[pert] = float(np.mean(scores))
+                    logger.debug(f"Perturbation {pert}: {len(scores):,} groups, avg = {final_results[pert]:.4f}")
+                
+                # Process results into DataFrames
+                results_df, agg_results_df = process_pearson_delta_results(final_results)
+                
+                # Save CSV files with detailed results
+                save_results_csv(results_df, agg_results_df, args.outdir, detailed_results=all_detailed_results)
+                
+                # Report overall average
+                mean_row = agg_results_df.filter(pl.col("statistic") == "mean")
+                if len(mean_row) > 0:
+                    overall_mean = float(mean_row.select("pearson_delta").item())
+                    logger.info(f"\nOverall Pearson Delta correlation: {overall_mean:.4f}")
+                    
+            else:
+                # Original behavior: process all data together
+                real = ad.read_h5ad(args.adata_real)
+                pred = ad.read_h5ad(args.adata_pred)
+                
+                # Filter to common perturbations
+                real, pred = filter_to_common_perturbations(real, pred, args.pert_col, actual_control_pert, args.group_by)
+                
+                # Prepare embeddings with potentially different keys
+                final_embed_key = prepare_embeddings(
+                    real, pred,
+                    embed_key_real=args.embed_key_real,
+                    embed_key_pred=args.embed_key_pred,
+                    embed_key=args.embed_key
+                )
+                
+                # Compute pearson_delta metric (bypassing cell-eval preprocessing)
+                logger.info("Computing Pearson delta (optimized pseudobulking)...")
+                results, detailed_results = compute_pearson_delta_optimized(
+                    real, pred, args.pert_col, actual_control_pert,
+                    group_by_cols=args.group_by, embed_key=final_embed_key
+                )
+                
+                # Process results into DataFrames
+                results_df, agg_results_df = process_pearson_delta_results(results)
+                
+                # Save CSV files
+                save_results_csv(results_df, agg_results_df, args.outdir, detailed_results=detailed_results)
+                
+                # Report overall average (single celltype case)
+                mean_row = agg_results_df.filter(pl.col("statistic") == "mean")
+                if len(mean_row) > 0:
+                    overall_mean = float(mean_row.select("pearson_delta").item())
+                    logger.info(f"Overall Pearson Delta correlation: {overall_mean:.4f}")
         
     except Exception as e:
         print(f"Error: {e}")
