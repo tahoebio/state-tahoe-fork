@@ -70,3 +70,32 @@ python /tahoe/drive_3/ANALYSIS/analysis_190/Code/cell-eval/pearson_delta_only.py
 ```
 
 
+
+
+
+```bash
+python /tahoe/drive_3/ANALYSIS/analysis_190/Code/cell-eval/pearson_delta_only.py \
+--adata-pred adata_pred.h5ad \
+--adata-real adata_real.h5ad \
+--control-pert PBS \
+--pert-col cytokine \
+--celltype-col donor \
+--allow-discrete \
+--outdir pearson-delta-only-results \
+--group-by cell_type
+```
+
+```bash
+python /tahoe/drive_3/ANALYSIS/analysis_190/Code/cell-eval/pearson_delta_only.py \
+--adata-pred adata_pred.h5ad \
+--adata-real adata_real.h5ad \
+--control-pert PBS \
+--pert-col cytokine \
+--celltype-col donor \
+--allow-discrete \
+--outdir ungrouped-pearson-delta-only-results
+```
+
+
+
+
