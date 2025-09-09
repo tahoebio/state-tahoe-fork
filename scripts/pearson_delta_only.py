@@ -333,10 +333,10 @@ def _compute_pearson_delta_impl(real, pred, real_keys, pred_keys,
     
     # Create pseudobulks using keys passed as parameters
     logger.info("Creating pseudobulks for real data...")
-    real_pseudobulks = _create_pseudobulks(real_matrix, real_keys.values)
+    real_pseudobulks, real_cell_counts = _create_pseudobulks(real_matrix, real_keys.values)
     
     logger.info("Creating pseudobulks for predicted data...")
-    pred_pseudobulks = _create_pseudobulks(pred_matrix, pred_keys.values)
+    pred_pseudobulks, pred_cell_counts = _create_pseudobulks(pred_matrix, pred_keys.values)
     
     logger.info(f"Created {len(real_pseudobulks)} real pseudobulks and {len(pred_pseudobulks)} pred pseudobulks")
     
@@ -430,7 +430,9 @@ def _compute_pearson_delta_impl(real, pred, real_keys, pred_keys,
             detailed_correlations.append({
                 'perturbation': perturbation,
                 'group': group_name,
-                'pearson_delta': float(corr)
+                'pearson_delta': float(corr),
+                'n_cells_treatment': real_cell_counts[key],
+                'n_cells_control': real_cell_counts[control_key]
             })
     
     # Now compute averages per perturbation for backward compatibility
@@ -461,7 +463,13 @@ def _compute_pearson_delta_impl(real, pred, real_keys, pred_keys,
 
 
 def _create_pseudobulks(matrix, compound_keys):
-    """Create pseudobulks from matrix by averaging over compound keys."""
+    """Create pseudobulks from matrix by averaging over compound keys.
+    
+    Returns:
+        tuple: (pseudobulks_dict, cell_counts_dict) where pseudobulks_dict contains
+               averaged expression values and cell_counts_dict contains number of cells
+               per group
+    """
     import polars as pl
     
     logger.debug(f"Creating pseudobulks from {matrix.shape[0]} cells x {matrix.shape[1]} features")
@@ -474,25 +482,29 @@ def _create_pseudobulks(matrix, compound_keys):
     
     df = pl.DataFrame(df_data)
     
-    # Group by compound key and take mean
-    logger.debug("Grouping by compound key and computing means...")
+    # Group by compound key and take mean + count
+    logger.debug("Grouping by compound key and computing means and counts...")
     feature_cols = [f"feature_{i}" for i in range(n_features)]
     pseudobulks_df = df.group_by("compound_key").agg([
         pl.col(col).mean().alias(col) for col in feature_cols
+    ] + [
+        pl.col("compound_key").count().alias("cell_count")
     ])
     
     logger.debug(f"Created {len(pseudobulks_df)} pseudobulk groups")
     
-    # Convert back to dictionary of arrays
+    # Convert back to dictionary of arrays and separate cell counts
     logger.debug("Converting to dictionary format...")
     pseudobulks = {}
+    cell_counts = {}
     for row in pseudobulks_df.iter_rows(named=True):
         key = row["compound_key"]
         values = np.array([row[col] for col in feature_cols])
         pseudobulks[key] = values
+        cell_counts[key] = row["cell_count"]
     
     logger.debug(f"Pseudobulking completed: {len(pseudobulks)} groups")
-    return pseudobulks
+    return pseudobulks, cell_counts
 
 
 def save_results_csv(results_df: pl.DataFrame, agg_results_df: pl.DataFrame, outdir: str, celltype: str = None, detailed_results: list = None):
