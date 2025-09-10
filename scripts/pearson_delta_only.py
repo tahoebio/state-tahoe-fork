@@ -1020,8 +1020,11 @@ def main():
             logger.info("\n" + "="*60)
             logger.info(f"Processing with celltype splitting (column: {args.celltype_col})")
             
+            # Initialize all_results_by_celltype for all cases
+            all_results_by_celltype = {}
+            
             # Check if we should use memory-efficient mode
-            if args.group_by and len(args.group_by) == 1 and args.use_backed:
+            if args.use_backed and (args.group_by and len(args.group_by) == 1):
                 # Memory-efficient mode for celltype + group-by
                 logger.info(f"✓ MEMORY-EFFICIENT MODE: Processing each {args.group_by[0]} within each celltype separately")
                 logger.info(f"Initial memory usage: {get_memory_usage():.2f} GB")
@@ -1037,8 +1040,6 @@ def main():
                 logger.info(f"Found {len(unique_groups):,} {args.group_by[0]} values: {sorted(unique_groups)}")
                 
                 # Process each celltype-group combination separately
-                all_results_by_celltype = {}
-                
                 for ct in sorted(unique_celltypes):
                     logger.info(f"\n{'='*60}")
                     logger.info(f"Processing celltype: {ct}")
@@ -1112,49 +1113,91 @@ def main():
                         del real_subset, pred_subset
                         logger.info(f"    Subset processed and freed, memory: {get_memory_usage():.2f} GB")
                 
-                # Average results across groups for this celltype
-                logger.info(f"\nAveraging results across {args.group_by[0]} groups for celltype {ct}...")
-                ct_final_results = {}
-                for pert, scores in ct_results.items():
-                    ct_final_results[pert] = float(np.mean(scores))
-                    logger.debug(f"  {pert}: {len(scores):,} groups, avg = {ct_final_results[pert]:.4f}")
+                    # Average results across groups for this celltype
+                    logger.info(f"\nAveraging results across {args.group_by[0]} groups for celltype {ct}...")
+                    ct_final_results = {}
+                    for pert, scores in ct_results.items():
+                        ct_final_results[pert] = float(np.mean(scores))
+                        logger.debug(f"  {pert}: {len(scores):,} groups, avg = {ct_final_results[pert]:.4f}")
+                    
+                    # Store results for this celltype
+                    all_results_by_celltype[ct] = (ct_final_results, ct_detailed)
+                    logger.info(f"Celltype {ct} completed: {len(ct_final_results):,} perturbations, {len(ct_detailed):,} detailed results")
+                    
+            elif args.use_backed and not args.group_by:
+                # Memory-efficient mode for celltype-only processing (no group-by)
+                logger.info(f"✓ MEMORY-EFFICIENT MODE: Processing each celltype separately")
+                logger.info(f"Initial memory usage: {get_memory_usage():.2f} GB")
                 
-                # Store results for this celltype
-                all_results_by_celltype[ct] = (ct_final_results, ct_detailed)
-                logger.info(f"Celltype {ct} completed: {len(ct_final_results):,} perturbations, {len(ct_detailed):,} detailed results")
+                # Get unique celltypes using backed mode
+                logger.info(f"\nIdentifying unique celltypes...")
+                real_backed = ad.read_h5ad(args.adata_real, backed='r')
+                unique_celltypes = real_backed.obs[args.celltype_col].unique()
+                real_backed.file.close()
                 
-            # Final output processing and file saving
-            logger.info(f"\n{'='*60}")
-            logger.info("Processing final results across all celltypes...")
-            
-            all_agg_results = []
-            
-            for ct, (ct_results, ct_detailed) in all_results_by_celltype.items():
-                logger.info(f"\nProcessing results for celltype: {ct}")
+                logger.info(f"Found {len(unique_celltypes):,} celltypes: {sorted(unique_celltypes)}")
                 
-                # Process results into DataFrames
-                results_df, agg_results_df = process_pearson_delta_results(ct_results, ct)
-                
-                # Save CSV files for this celltype
-                save_results_csv(results_df, agg_results_df, args.outdir, ct, ct_detailed)
-                
-                # Store aggregated results for overall average
-                all_agg_results.append(agg_results_df)
-                
-                logger.info(f"Saved results for celltype {ct}: {len(ct_results):,} perturbations")
-            
-            # Compute overall average across all celltypes
-            if all_agg_results:
-                logger.info(f"\nComputing overall average across {len(all_agg_results):,} celltypes...")
-                overall_scores = []
-                for agg_df in all_agg_results:
-                    mean_row = agg_df.filter(pl.col("statistic") == "mean")
-                    if len(mean_row) > 0:
-                        overall_scores.append(float(mean_row.select("pearson_delta").item()))
-                
-                if overall_scores:
-                    overall_mean = sum(overall_scores) / len(overall_scores)
-                    logger.info(f"Overall Pearson Delta correlation across all celltypes: {overall_mean:.4f}")
+                # Process each celltype separately
+                for ct in sorted(unique_celltypes):
+                    logger.info(f"\n{'='*60}")
+                    logger.info(f"Processing celltype: {ct}")
+                    
+                    # Load only this celltype using backed mode
+                    logger.info(f"Loading celltype {ct} data...")
+                    real_backed = ad.read_h5ad(args.adata_real, backed='r')
+                    pred_backed = ad.read_h5ad(args.adata_pred, backed='r')
+                    
+                    # Filter to this celltype
+                    real_mask = real_backed.obs[args.celltype_col] == ct
+                    pred_mask = pred_backed.obs[args.celltype_col] == ct
+                    
+                    # Load subsets
+                    real_ct = real_backed[real_mask, :].to_memory()
+                    pred_ct = pred_backed[pred_mask, :].to_memory()
+                    
+                    # Close backed files
+                    real_backed.file.close()
+                    pred_backed.file.close()
+                    
+                    logger.info(f"  Loaded {real_ct.shape[0]:,} real cells, {pred_ct.shape[0]:,} pred cells")
+                    
+                    # Filter to common perturbations within this celltype
+                    try:
+                        real_ct, pred_ct = filter_to_common_perturbations(
+                            real_ct, pred_ct, args.pert_col, actual_control_pert, None
+                        )
+                    except ValueError as e:
+                        logger.warning(f"Skipping cell type {ct}: {e}")
+                        del real_ct, pred_ct
+                        continue
+                    
+                    # Prepare embeddings
+                    final_embed_key = prepare_embeddings(
+                        real_ct, pred_ct,
+                        embed_key_real=args.embed_key_real,
+                        embed_key_pred=args.embed_key_pred,
+                        embed_key=args.embed_key
+                    )
+                    
+                    # Compute pearson_delta for this celltype
+                    logger.info("Computing Pearson delta (optimized pseudobulking)...")
+                    results, detailed_results = compute_pearson_delta_optimized(
+                        real_ct, pred_ct, args.pert_col, actual_control_pert,
+                        group_by_cols=None,  # No grouping
+                        embed_key=final_embed_key
+                    )
+                    
+                    # Add celltype info to detailed results
+                    for detail in detailed_results:
+                        detail['celltype'] = ct
+                    
+                    # Store results for this celltype
+                    all_results_by_celltype[ct] = (results, detailed_results)
+                    logger.info(f"Celltype {ct} completed: {len(results):,} perturbations, {len(detailed_results):,} detailed results")
+                    
+                    # Free memory immediately
+                    del real_ct, pred_ct
+                    logger.info(f"Memory freed, current usage: {get_memory_usage():.2f} GB")
                     
             else:
                 # Original behavior: load full datasets
@@ -1189,8 +1232,6 @@ def main():
                         f"Number of celltypes in real and pred anndata must match: "
                         f"{len(real_split)} != {len(pred_split)}"
                     )
-                
-                all_agg_results = []
                 
                 for ct in real_split.keys():
                     real_ct = real_split[ct]
@@ -1228,21 +1269,41 @@ def main():
                     # Save CSV files for this celltype
                     save_results_csv(results_df, agg_results_df, args.outdir, ct, detailed_results)
                     
-                    # Store aggregated results for overall average
-                    all_agg_results.append(agg_results_df)
+                    # Store results for this celltype
+                    all_results_by_celltype[ct] = (results, detailed_results)
+            
+            # Final output processing and file saving
+            logger.info(f"\n{'='*60}")
+            logger.info("Processing final results across all celltypes...")
+            
+            all_agg_results = []
+            
+            for ct, (ct_results, ct_detailed) in all_results_by_celltype.items():
+                logger.info(f"\nProcessing results for celltype: {ct}")
                 
-                # Compute overall average across all celltypes
-                if all_agg_results:
-                    # Combine all agg results and compute overall mean
-                    overall_scores = []
-                    for agg_df in all_agg_results:
-                        mean_row = agg_df.filter(pl.col("statistic") == "mean")
-                        if len(mean_row) > 0:
-                            overall_scores.append(float(mean_row.select("pearson_delta").item()))
-                    
-                    if overall_scores:
-                        overall_mean = sum(overall_scores) / len(overall_scores)
-                        logger.info(f"Overall Pearson Delta correlation across all celltypes: {overall_mean:.4f}")
+                # Process results into DataFrames
+                results_df, agg_results_df = process_pearson_delta_results(ct_results, ct)
+                
+                # Save CSV files for this celltype
+                save_results_csv(results_df, agg_results_df, args.outdir, ct, ct_detailed)
+                
+                # Store aggregated results for overall average
+                all_agg_results.append(agg_results_df)
+                
+                logger.info(f"Saved results for celltype {ct}: {len(ct_results):,} perturbations")
+            
+            # Compute overall average across all celltypes
+            if all_agg_results:
+                logger.info(f"\nComputing overall average across {len(all_agg_results):,} celltypes...")
+                overall_scores = []
+                for agg_df in all_agg_results:
+                    mean_row = agg_df.filter(pl.col("statistic") == "mean")
+                    if len(mean_row) > 0:
+                        overall_scores.append(float(mean_row.select("pearson_delta").item()))
+                
+                if overall_scores:
+                    overall_mean = sum(overall_scores) / len(overall_scores)
+                    logger.info(f"Overall Pearson Delta correlation across all celltypes: {overall_mean:.4f}")
             
         else:
             # Check if we're using group-by with backed mode for memory efficiency
