@@ -29,11 +29,14 @@ import warnings
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
 
-import h5py
+import anndata as ad
 import numpy as np
 import psutil
 import torch
 from tqdm import tqdm
+
+# Add UV-installed arc-state package to path for state imports (after torch import)
+sys.path.insert(0, '/home/valentine/.local/share/uv/tools/arc-state/lib/python3.11/site-packages')
 
 # Set up logging
 logging.basicConfig(
@@ -152,10 +155,13 @@ class DecoderPerformanceTracker:
         recent_time = current_time - self.last_update_time
         recent_rate = recent_cells / recent_time if recent_time > 0 else 0
         
-        # Calculate ETA
-        remaining_cells = self.total_cells - self.processed_cells
-        eta_seconds = remaining_cells / recent_rate if recent_rate > 0 else 0
-        eta_hours = eta_seconds / 3600
+        # Calculate ETA (safe division)
+        if self.total_cells > 0 and recent_rate > 0:
+            remaining_cells = self.total_cells - self.processed_cells
+            eta_seconds = remaining_cells / recent_rate
+            eta_hours = eta_seconds / 3600
+        else:
+            eta_hours = 0
         
         # Calculate component percentages
         total_processing_time = sum([
@@ -176,9 +182,12 @@ class DecoderPerformanceTracker:
         else:
             percentages = {'GPU Transfer': 0, 'Decode': 0, 'CPU Transfer': 0, 'Tensor Ops': 0}
             
-        # Progress bar
-        progress_pct = (self.processed_cells / self.total_cells) * 100
-        log.info(f"📊 Progress: {self.processed_cells:,}/{self.total_cells:,} cells ({progress_pct:.1f}%)")
+        # Progress bar (safe division)
+        if self.total_cells > 0:
+            progress_pct = (self.processed_cells / self.total_cells) * 100
+            log.info(f"📊 Progress: {self.processed_cells:,}/{self.total_cells:,} cells ({progress_pct:.1f}%)")
+        else:
+            log.info(f"📊 Progress: {self.processed_cells:,} cells processed")
         
         # Performance breakdown
         log.info(f"⚡ Performance: GPU={percentages['GPU Transfer']:.1f}%, "
@@ -497,76 +506,67 @@ def load_model_with_timing(checkpoint_path: Path, device: torch.device,
     return model, decoder
 
 
-def load_embeddings_with_timing(input_path: Path, embedding_key: str, 
-                               tracker: DecoderPerformanceTracker) -> Tuple[np.ndarray, Dict[str, Any], int]:
-    """Load embeddings from h5ad file with timing and memory monitoring."""
+def load_embeddings_with_timing(input_path: Path, embedding_key: str,
+                               tracker: DecoderPerformanceTracker) -> Tuple[np.ndarray, ad.AnnData, int]:
+    """Load embeddings from h5ad file with timing and memory monitoring using AnnData."""
     log.info(f"📖 Loading embeddings from: {input_path}")
-    
-    # Open file
+
+    # Load file using AnnData with backed mode first
     file_start = time.time()
     try:
-        with h5py.File(input_path, 'r') as f:
-            file_time = time.time() - file_start
-            tracker.update_timing('file_opening', file_time)
-            
-            # Get total number of cells
-            n_cells = f['obs'].attrs['_index'].shape[0] if '_index' in f['obs'].attrs else len(f['obs']['_index'])
-            log.info(f"📊 Found {n_cells:,} cells in dataset")
-            
-            # Check if embedding key exists
-            if 'obsm' not in f or embedding_key not in f['obsm']:
-                available_keys = list(f['obsm'].keys()) if 'obsm' in f else []
-                log.error(f"❌ Embedding key '{embedding_key}' not found in .obsm")
-                log.error(f"Available keys: {available_keys}")
-                sys.exit(1)
-            
-            # Load embeddings
-            emb_start = time.time()
-            embeddings_dataset = f['obsm'][embedding_key]
-            embeddings = embeddings_dataset[:]  # Load into memory
-            emb_time = time.time() - emb_start
-            tracker.update_timing('embedding_reading', emb_time)
-            
-            log.info(f"🧬 Loaded embeddings: shape {embeddings.shape}, dtype {embeddings.dtype}")
-            
-            # Load essential metadata
-            meta_start = time.time()
-            metadata = {}
-            
-            # Load obs data (essential for preserving cell information)
-            if 'obs' in f:
-                obs_data = {}
-                for key in f['obs'].keys():
-                    if key != '_index':  # Skip index, we'll handle separately
-                        obs_data[key] = f['obs'][key][:]
-                # Get index
-                if '_index' in f['obs']:
-                    obs_data['_index'] = f['obs']['_index'][:]
-                metadata['obs'] = obs_data
-            
-            # Load other obsm keys (preserve existing embeddings/features)
-            if 'obsm' in f:
-                obsm_data = {}
-                for key in f['obsm'].keys():
-                    if key != embedding_key:  # Skip the one we already loaded
-                        obsm_data[key] = f['obsm'][key][:]
-                metadata['obsm'] = obsm_data
-            
-            # Load var data if it exists (gene information)
-            if 'var' in f:
-                var_data = {}
-                for key in f['var'].keys():
-                    var_data[key] = f['var'][key][:]
-                metadata['var'] = var_data
-            
-            meta_time = time.time() - meta_start
+        log.info("Opening file in backed mode for initial inspection...")
+        adata_backed = ad.read_h5ad(input_path, backed='r')
+
+        # Get basic info safely
+        n_cells = adata_backed.n_obs
+        n_vars = adata_backed.n_vars
+        log.info(f"📊 Found {n_cells:,} cells x {n_vars:,} vars in dataset")
+
+        # Update tracker with correct cell count early
+        tracker.total_cells = n_cells
+
+        # Check if embedding key exists
+        if embedding_key not in adata_backed.obsm:
+            available_keys = list(adata_backed.obsm.keys())
+            adata_backed.file.close()
+            log.error(f"❌ Embedding key '{embedding_key}' not found in .obsm")
+            log.error(f"Available keys: {available_keys}")
+            sys.exit(1)
+
+        # Get embedding info
+        emb_shape = adata_backed.obsm[embedding_key].shape
+        log.info(f"🧬 Embedding shape: {emb_shape}")
+
+        # Close backed file
+        adata_backed.file.close()
+
+        file_time = time.time() - file_start
+        tracker.update_timing('file_opening', file_time)
+
+        # Now load only what we need
+        log.info("Loading full data into memory...")
+        emb_start = time.time()
+        adata = ad.read_h5ad(input_path)
+        embeddings = adata.obsm[embedding_key]
+        emb_time = time.time() - emb_start
+        tracker.update_timing('embedding_reading', emb_time)
+
+        log.info(f"✅ Loaded embeddings: shape {embeddings.shape}, dtype {embeddings.dtype}")
+
+        # Metadata timing (minimal since AnnData handles this automatically)
+        meta_start = time.time()
+        # All metadata is already loaded in the AnnData object
+        meta_time = time.time() - meta_start
+        if meta_time > 0:  # Avoid division by zero
             tracker.update_timing('metadata_reading', meta_time)
-            
+
     except Exception as e:
         log.error(f"❌ Failed to load data from {input_path}: {e}")
+        import traceback
+        log.error(f"Traceback: {traceback.format_exc()}")
         sys.exit(1)
-    
-    return embeddings, metadata, n_cells
+
+    return embeddings, adata, n_cells
 
 
 def process_embeddings_in_batches(embeddings: np.ndarray, decoder: Any, device: torch.device,
@@ -672,69 +672,38 @@ def process_embeddings_in_batches(embeddings: np.ndarray, decoder: Any, device: 
     return all_predictions
 
 
-def save_results_with_timing(output_path: Path, predictions: np.ndarray, metadata: Dict[str, Any],
+def save_results_with_timing(output_path: Path, predictions: np.ndarray, adata_original: ad.AnnData,
                            tracker: DecoderPerformanceTracker):
-    """Save predictions to h5ad file with timing."""
+    """Save predictions to h5ad file with timing using AnnData."""
     log.info(f"💾 Saving results to: {output_path}")
-    
-    # Create output file
+
+    # Create output AnnData object
     create_start = time.time()
-    with h5py.File(output_path, 'w') as f:
-        create_time = time.time() - create_start
-        tracker.update_timing('output_file_creation', create_time)
-        
-        # Save predictions in obsm['X_hvg']
-        pred_start = time.time()
-        f.create_dataset('obsm/X_hvg', data=predictions, compression='gzip', compression_opts=6)
-        pred_time = time.time() - pred_start
-        tracker.update_timing('predictions_writing', pred_time)
-        
-        log.info(f"✅ Predictions saved: shape {predictions.shape}, dtype {predictions.dtype}")
-        
-        # Save metadata
-        meta_start = time.time()
-        
-        # Save obs data
-        if 'obs' in metadata:
-            obs_grp = f.create_group('obs')
-            for key, data in metadata['obs'].items():
-                if isinstance(data, np.ndarray):
-                    if data.dtype.kind in ['U', 'S', 'O']:  # String data
-                        # Convert to bytes for HDF5 compatibility
-                        if data.dtype.kind == 'O':
-                            data = np.array([str(x).encode('utf-8') for x in data])
-                        obs_grp.create_dataset(key, data=data)
-                    else:
-                        obs_grp.create_dataset(key, data=data)
-        
-        # Save other obsm data
-        if 'obsm' in metadata:
-            if 'obsm' not in f:
-                f.create_group('obsm')
-            for key, data in metadata['obsm'].items():
-                f['obsm'].create_dataset(key, data=data, compression='gzip', compression_opts=6)
-        
-        # Save var data
-        if 'var' in metadata:
-            var_grp = f.create_group('var')
-            for key, data in metadata['var'].items():
-                if isinstance(data, np.ndarray):
-                    if data.dtype.kind in ['U', 'S', 'O']:  # String data
-                        if data.dtype.kind == 'O':
-                            data = np.array([str(x).encode('utf-8') for x in data])
-                        var_grp.create_dataset(key, data=data)
-                    else:
-                        var_grp.create_dataset(key, data=data)
-        
-        meta_time = time.time() - meta_start
-        tracker.update_timing('metadata_writing', meta_time)
-        
-        # Finalize file
-        final_start = time.time()
-        f.flush()
-        final_time = time.time() - final_start
-        tracker.update_timing('file_finalization', final_time)
-    
+    # Copy the original AnnData to preserve all metadata
+    adata_output = adata_original.copy()
+    create_time = time.time() - create_start
+    tracker.update_timing('output_file_creation', create_time)
+
+    # Add predictions to obsm['X_hvg']
+    pred_start = time.time()
+    adata_output.obsm['X_hvg'] = predictions
+    pred_time = time.time() - pred_start
+    tracker.update_timing('predictions_writing', pred_time)
+
+    log.info(f"✅ Predictions added to AnnData: shape {predictions.shape}, dtype {predictions.dtype}")
+
+    # Save using AnnData (this handles all metadata automatically)
+    meta_start = time.time()
+    adata_output.write_h5ad(output_path, compression='gzip')
+    meta_time = time.time() - meta_start
+    tracker.update_timing('metadata_writing', meta_time)
+
+    # Finalization timing (minimal since AnnData handles this)
+    final_start = time.time()
+    # No explicit finalization needed with AnnData
+    final_time = time.time() - final_start
+    tracker.update_timing('file_finalization', final_time)
+
     log.info(f"✅ Results saved successfully")
 
 
@@ -771,33 +740,26 @@ def main():
     # Detect device
     device = detect_device(args.device)
     
-    # Get initial cell count for performance tracking
-    try:
-        with h5py.File(input_path, 'r') as f:
-            n_cells = f['obs'].attrs['_index'].shape[0] if '_index' in f['obs'].attrs else len(f['obs']['_index'])
-    except:
-        n_cells = 0  # Will be updated when we load
-    
-    # Initialize performance tracker
-    tracker = DecoderPerformanceTracker(n_cells, input_path.name)
+    # Initialize performance tracker (will be updated with correct cell count after loading)
+    tracker = DecoderPerformanceTracker(0, input_path.name)
     
     try:
         # Load model
         model, decoder = load_model_with_timing(checkpoint_path, device, tracker)
         
         # Load embeddings
-        embeddings, metadata, n_cells = load_embeddings_with_timing(input_path, args.embedding_key, tracker)
-        
+        embeddings, adata_original, n_cells = load_embeddings_with_timing(input_path, args.embedding_key, tracker)
+
         # Update tracker with correct cell count
         tracker.total_cells = n_cells
-        
+
         # Process embeddings
         predictions = process_embeddings_in_batches(
             embeddings, decoder, device, args.batch_size, args.mixed_precision, tracker
         )
-        
+
         # Save results
-        save_results_with_timing(output_path, predictions, metadata, tracker)
+        save_results_with_timing(output_path, predictions, adata_original, tracker)
         
         # Generate and log final report
         report = tracker.generate_final_report()
