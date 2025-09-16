@@ -3,7 +3,7 @@
 Decode embeddings to gene expression using a trained State TX model's gene decoder.
 
 This script takes .h5ad files with embeddings and uses a trained model's gene decoder
-to predict gene expression, storing the results in .obsm['X_hvg'].
+to predict gene expression, storing the results in .X.
 
 Key features:
 - Comprehensive performance tracking with detailed timing breakdown
@@ -365,7 +365,7 @@ Examples:
     )
     parser.add_argument(
         "--output", type=str, required=True,
-        help="Path to output .h5ad file (will store predictions in .obsm['X_hvg'])"
+        help="Path to output .h5ad file (will store predictions in .X)"
     )
     
     # Optional arguments
@@ -684,9 +684,9 @@ def save_results_with_timing(output_path: Path, predictions: np.ndarray, adata_o
     create_time = time.time() - create_start
     tracker.update_timing('output_file_creation', create_time)
 
-    # Add predictions to obsm['X_hvg']
+    # Add predictions to .X
     pred_start = time.time()
-    adata_output.obsm['X_hvg'] = predictions
+    adata_output.X = predictions
     pred_time = time.time() - pred_start
     tracker.update_timing('predictions_writing', pred_time)
 
@@ -694,7 +694,7 @@ def save_results_with_timing(output_path: Path, predictions: np.ndarray, adata_o
 
     # Save using AnnData (this handles all metadata automatically)
     meta_start = time.time()
-    adata_output.write_h5ad(output_path, compression='gzip')
+    adata_output.write_h5ad(output_path, compression=None)
     meta_time = time.time() - meta_start
     tracker.update_timing('metadata_writing', meta_time)
 
