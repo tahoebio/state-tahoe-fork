@@ -112,6 +112,11 @@ def parse_arguments():
         action='store_true',
         help='[DEPRECATED: use --ignore-batch-boundaries] Compute global mean effects across all plates'
     )
+    parser.add_argument(
+        '--abs-correlation',
+        action='store_true',
+        help='Compute correlations using absolute values of deltas (experimental)'
+    )
     
     args = parser.parse_args()
     
@@ -126,7 +131,11 @@ def parse_arguments():
     if args.ignore_plate_boundaries and not args.ignore_batch_boundaries:
         args.ignore_batch_boundaries = True
         print("WARNING: --ignore-plate-boundaries is deprecated, using --ignore-batch-boundaries")
-    
+
+    # Warn about absolute correlation mode
+    if args.abs_correlation:
+        print("WARNING: Using absolute value correlation mode - correlations will be computed on abs(deltas)")
+
     return args
 
 
@@ -341,8 +350,8 @@ def parse_toml_splits(toml_file):
     return explicit_splits, holdout_cells, zeroshot_cells
 
 
-def evaluate_batch(batch_adata, batch_name, explicit_splits, holdout_cells, zeroshot_cells, control_pert, pert_col, 
-                   cell_col, embed_key):
+def evaluate_batch(batch_adata, batch_name, explicit_splits, holdout_cells, zeroshot_cells, control_pert, pert_col,
+                   cell_col, embed_key, abs_correlation=False):
     """Process one batch with progress tracking."""
     
     # Map control string if needed  
@@ -446,11 +455,14 @@ def evaluate_batch(batch_adata, batch_name, explicit_splits, holdout_cells, zero
         
         # Predicted delta (mean effect from cell line's training perturbations)
         pred_delta = cell_effects[cell_line]
-        
+
         # Compute Pearson correlation
         if len(true_delta) > 1 and len(pred_delta) > 1:
-            corr, p_value = pearsonr(true_delta, pred_delta)
-            
+            if abs_correlation:
+                corr, p_value = pearsonr(np.abs(true_delta), np.abs(pred_delta))
+            else:
+                corr, p_value = pearsonr(true_delta, pred_delta)
+
             # Handle NaN correlations (can occur with constant vectors)
             if not np.isfinite(corr):
                 corr = 0.0
@@ -469,8 +481,8 @@ def evaluate_batch(batch_adata, batch_name, explicit_splits, holdout_cells, zero
     return correlations
 
 
-def evaluate_global(batch_data, explicit_splits, holdout_cells, zeroshot_cells, control_pert, pert_col, 
-                    cell_col, embed_key):
+def evaluate_global(batch_data, explicit_splits, holdout_cells, zeroshot_cells, control_pert, pert_col,
+                    cell_col, embed_key, abs_correlation=False):
     """Evaluate using global mean effects across all batches (ignoring batch boundaries)."""
     
     print("Computing global mean effects across all batches...")
@@ -589,11 +601,14 @@ def evaluate_global(batch_data, explicit_splits, holdout_cells, zeroshot_cells, 
         
         # Predicted delta (now using GLOBAL cell line effect)
         pred_delta = global_cell_effects[cell_line]
-        
+
         # Compute Pearson correlation
         if len(true_delta) > 1 and len(pred_delta) > 1:
-            corr, p_value = pearsonr(true_delta, pred_delta)
-            
+            if abs_correlation:
+                corr, p_value = pearsonr(np.abs(true_delta), np.abs(pred_delta))
+            else:
+                corr, p_value = pearsonr(true_delta, pred_delta)
+
             # Handle NaN correlations (can occur with constant vectors)
             if not np.isfinite(corr):
                 corr = 0.0
@@ -719,8 +734,8 @@ def main():
         # Global evaluation: compute mean effects across all batches
         all_correlations = evaluate_global(
             batch_data, explicit_splits, holdout_cells, zeroshot_cells,
-            args.control_pert, args.pert_col, 
-            args.cell_col, args.embed_key
+            args.control_pert, args.pert_col,
+            args.cell_col, args.embed_key, args.abs_correlation
         )
     else:
         # Batch-specific evaluation: process each batch separately (original behavior)
@@ -729,8 +744,8 @@ def main():
             print(f"\nProcessing batch {batch_name} ({batch_adata.shape[0]} observations)...")
             correlations = evaluate_batch(
                 batch_adata, batch_name, explicit_splits, holdout_cells, zeroshot_cells,
-                args.control_pert, args.pert_col, 
-                args.cell_col, args.embed_key
+                args.control_pert, args.pert_col,
+                args.cell_col, args.embed_key, args.abs_correlation
             )
             all_correlations.extend(correlations)
     
@@ -750,12 +765,13 @@ def main():
     print("="*60)
     
     # Save detailed correlations
-    output_file = f"{args.output_dir}/context_mean_detailed_correlations.csv"
+    abs_suffix = "_abs" if args.abs_correlation else ""
+    output_file = f"{args.output_dir}/context_mean{abs_suffix}_detailed_correlations.csv"
     full_df.to_csv(output_file, index=False)
     print(f"Saved detailed correlations to: {output_file}")
-    
+
     # Save summaries as JSON
-    summary_file = f"{args.output_dir}/context_mean_hierarchical_summaries.json"
+    summary_file = f"{args.output_dir}/context_mean{abs_suffix}_hierarchical_summaries.json"
     with open(summary_file, 'w') as f:
         json.dump(summaries, f, indent=2)
     print(f"Saved hierarchical summaries to: {summary_file}")
