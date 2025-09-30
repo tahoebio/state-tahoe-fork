@@ -1,5 +1,92 @@
 # Data Processing Scripts
 
+## h5ad_to_huggingface.py
+
+**Purpose**: Converts H5AD (AnnData) format to HuggingFace dataset format for compatibility with dataset-based training pipelines.
+
+**Key Features**:
+- **Memory-efficient chunked processing**: Handles large H5AD files by processing in configurable chunks (default 100K cells)
+- **Automatic schema inference**: Dynamically creates HuggingFace Features schema from .obs column types
+- **Flexible .obsm selection**: Include all or specific embedding keys from .obsm
+- **Skips .X by default**: Focuses on metadata and embeddings to minimize file size and memory usage
+- **Optional .var export**: Saves gene/variable information as separate parquet file
+- **Info mode**: Check H5AD structure without converting
+
+**Usage**:
+```bash
+# Check H5AD file info without converting
+python h5ad_to_huggingface.py input.h5ad output_dir/ --info-only
+
+# Convert with all .obsm embeddings
+python h5ad_to_huggingface.py input.h5ad output_dir/
+
+# Convert with specific .obsm keys only
+python h5ad_to_huggingface.py input.h5ad output_dir/ --obsm-keys X_hvg mosaicfm-70m-merged
+
+# Adjust chunk size for memory management
+python h5ad_to_huggingface.py input.h5ad output_dir/ --chunk-size 50000
+
+# Skip saving .var information
+python h5ad_to_huggingface.py input.h5ad output_dir/ --no-save-var
+```
+
+**Input/Output**:
+- **Input**: H5AD file with .obs metadata and .obsm embeddings
+- **Output**: HuggingFace dataset directory (loadable with `datasets.load_from_disk()`)
+- **Optional**: var_info.parquet containing gene/variable metadata
+
+**Data Structure**:
+- **Source .obs columns** → HF dataset columns (with automatic dtype conversion)
+- **Source .obsm embeddings** → HF dataset columns as Sequence(Value('float32'))
+- **Source .X** → Skipped (not included in output)
+- **Source .var** → Optional separate parquet file
+
+**Schema Inference**:
+- String/object columns → Value('string')
+- Integer columns → Value('int64')
+- Float columns → Value('float32')
+- Boolean columns → Value('bool')
+- Embedding arrays → Sequence(Value('float32'), length=dim)
+
+**Integration with Analysis Pipeline**:
+- **Reverse operation**: Use `dataset2anndata.py` to convert HF dataset back to H5AD
+- **Use case**: Convert H5AD files for training pipelines that require HuggingFace dataset format
+- **Complementary**: Works with existing streaming_dataset2hf.py for different data sources
+
+## decode_embeddings_to_gene_expression.py
+
+**Purpose**: Decodes embeddings to gene expression using a trained State TX model's gene decoder for evaluation with pearson_delta_only.py.
+
+**Key Features**:
+- Comprehensive performance tracking with detailed timing breakdown
+- Live progress monitoring with bottleneck detection
+- Memory-efficient batch processing with adaptive batch sizing
+- Uses AnnData instead of h5py for robust H5AD file handling
+- Supports UV arc-state package for StateTransitionPerturbationModel
+
+**Usage**:
+```bash
+uv run --with psutil --python /home/valentine/.local/share/uv/tools/arc-state/bin/python \
+/tahoe/drive_3/ANALYSIS/analysis_190/Code/state-tahoe-fork/scripts/decode_embeddings_to_gene_expression.py \
+--input adata_real.h5ad \
+--checkpoint ../checkpoints/final.ckpt \
+--embedding-key X_state \
+--output adata_decoded.h5ad
+```
+
+**Current Limitation**:
+- **IMMEDIATE REFACTOR NEEDED**: Script currently saves predictions to `.obsm['X_hvg']` but pearson_delta_only.py expects predictions in `.X`
+- **Next Steps**: Modify save_results_with_timing() to save decoded gene expression predictions to `.X` instead of `.obsm['X_hvg']` for direct compatibility with evaluation workflow
+
+**Integration Issues**:
+- pearson_delta_only.py compares real gene expression (`.X`) with predictions but current script saves to `.obsm['X_hvg']`
+- Requires either: (1) refactoring decoder to save to `.X`, or (2) creating wrapper to copy predictions from `.obsm['X_hvg']` to `.X`
+
+**Input/Output**:
+- **Input**: H5AD with embeddings in `.obsm[embedding_key]` (e.g., `X_state`)
+- **Current Output**: Predictions in `.obsm['X_hvg']` (incompatible)
+- **Needed Output**: Predictions in `.X` (compatible with evaluation)
+
 ## Baseline Scripts
 
 ### centroid_perturbation_mean_baseline.py
