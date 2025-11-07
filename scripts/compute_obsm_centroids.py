@@ -4,7 +4,7 @@ Compute centroids for .obsm slots based on categorical grouping columns.
 
 Takes a .h5ad file with multiple .obsm slots and produces a new .h5ad file
 with centroids computed for each group based on specified categorical columns.
-Uses a memory-efficient single-pass algorithm.
+Uses h5py for direct HDF5 access to avoid AnnData memory overhead.
 """
 
 import argparse
@@ -12,8 +12,7 @@ import os
 import sys
 from pathlib import Path
 import numpy as np
-import pandas as pd
-import scanpy as sc
+import h5py
 from collections import defaultdict
 import gc
 import psutil
@@ -46,21 +45,21 @@ def parse_arguments():
         type=str,
         nargs="+",
         required=True,
-        help="Categorical columns in .obs to group by (e.g., cell_line_id drugname_drugconc plate)"
+        help="Categorical columns in .obs to group by (e.g., cell_type cytokine donor)"
     )
     
     parser.add_argument(
         "--chunk-size",
         type=int,
-        default=10000,
-        help="Chunk size for processing large files"
+        default=None,
+        help="Chunk size for processing large files (default: auto-detect from HDF5 chunks)"
     )
     
     parser.add_argument(
         "--memory-limit-gb",
         type=float,
         default=200.0,
-        help="Memory limit in GB for deciding whether to use chunked processing"
+        help="Memory limit in GB (used for warnings only)"
     )
     
     parser.add_argument(
@@ -78,171 +77,221 @@ def get_file_size_gb(file_path):
     return size_bytes / (1024**3)
 
 
-def estimate_memory_usage(adata, verbose=False):
-    """Estimate memory usage for processing the AnnData object."""
-    n_cells = adata.n_obs
-    
-    # Estimate memory for .obsm slots
-    obsm_memory = 0
-    obsm_info = {}
-    
-    for key, matrix in adata.obsm.items():
-        memory_bytes = matrix.nbytes
-        obsm_memory += memory_bytes
-        obsm_info[key] = {
-            'shape': matrix.shape,
-            'dtype': matrix.dtype,
-            'memory_mb': memory_bytes / (1024**2)
-        }
-    
-    total_memory_gb = obsm_memory / (1024**3)
-    
-    if verbose:
-        print(f"Memory estimation:")
-        print(f"  Cells: {n_cells:,}")
-        print(f"  .obsm slots: {len(adata.obsm)}")
-        for key, info in obsm_info.items():
-            print(f"    {key}: {info['shape']} ({info['dtype']}, {info['memory_mb']:.1f} MB)")
-        print(f"  Total .obsm memory: {total_memory_gb:.2f} GB")
-    
-    return total_memory_gb, obsm_info
+def setup_logging(verbose=False):
+    """Setup logging with timestamps."""
+    level = logging.INFO if verbose else logging.WARNING
+    logging.basicConfig(
+        level=level,
+        format='%(asctime)s - %(levelname)s - %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    return logging.getLogger(__name__)
 
 
-def validate_input(adata, group_columns, logger=None):
-    """Validate input data and grouping columns."""
-    errors = []
-    warnings = []
-    
-    # Check if grouping columns exist
-    missing_cols = [col for col in group_columns if col not in adata.obs.columns]
-    if missing_cols:
-        errors.append(f"Missing columns in .obs: {missing_cols}")
-    
-    # Check if we have .obsm data
-    if len(adata.obsm) == 0:
-        errors.append("No .obsm slots found in the input file")
-    
-    # Check for missing values in grouping columns
-    total_missing = 0
-    for col in group_columns:
-        if col in adata.obs.columns:
-            missing_count = adata.obs[col].isna().sum()
-            if missing_count > 0:
-                warnings.append(f"Column '{col}' has {missing_count:,} missing values (will be skipped)")
-                total_missing += missing_count
-    
-    # Check for empty .obsm matrices
-    for obsm_name, matrix in adata.obsm.items():
-        if matrix.shape[0] != adata.n_obs:
-            errors.append(f".obsm['{obsm_name}'] has {matrix.shape[0]} rows but expected {adata.n_obs}")
-        if matrix.shape[1] == 0:
-            errors.append(f".obsm['{obsm_name}'] has 0 dimensions")
-    
-    if errors:
-        for error in errors:
-            if logger:
-                logger.error(error)
-            else:
-                print(f"ERROR: {error}", file=sys.stderr)
-        return False
-    
-    if warnings:
-        for warning in warnings:
-            if logger:
-                logger.warning(warning)
-            else:
-                print(f"WARNING: {warning}", file=sys.stderr)
-    
-    if logger:
-        logger.info("Input validation passed:")
-        logger.info(f"  Cells: {adata.n_obs:,}")
-        if total_missing > 0:
-            logger.info(f"  Cells with missing values: {total_missing:,} (will be skipped)")
-        logger.info(f"  .obsm slots: {list(adata.obsm.keys())}")
-        logger.info(f"  Grouping columns: {group_columns}")
-        
-        # Show group statistics
-        for col in group_columns:
-            unique_count = adata.obs[col].nunique()
-            logger.info(f"    {col}: {unique_count} unique values")
-    
-    return True
-
-
-def accumulate_group_statistics(adata, group_columns, logger=None):
+def get_optimal_chunk_size(h5_file, dataset_path, target_chunk_size=1000000):
     """
-    Single-pass algorithm to accumulate statistics for each group.
+    Determine optimal chunk size based on HDF5 compression chunks.
+    
+    Args:
+        h5_file: Open h5py file handle
+        dataset_path: Path to dataset in HDF5 file
+        target_chunk_size: Target number of rows per processing chunk
     
     Returns:
-        dict: {group_key: {obsm_name: {'sum': array, 'count': int}}}
+        Optimal chunk size aligned with HDF5 chunks
     """
-    if logger:
-        logger.info("Starting single-pass accumulation...")
+    if dataset_path not in h5_file:
+        return target_chunk_size
     
-    # Initialize statistics dictionary
+    dataset = h5_file[dataset_path]
+    if dataset.chunks:
+        # Use HDF5 chunk shape for efficient decompression
+        hdf5_chunk_rows = dataset.chunks[0]
+        # Round to nearest multiple for efficient processing
+        optimal_chunks = max(1, target_chunk_size // hdf5_chunk_rows)
+        return hdf5_chunk_rows * optimal_chunks
+    
+    return target_chunk_size
+
+
+def load_grouping_metadata(h5_file, group_columns, n_cells, logger=None):
+    """
+    Load only the grouping columns from .obs, handling categoricals efficiently.
+    
+    Args:
+        h5_file: Open h5py file handle
+        group_columns: List of column names to load
+        n_cells: Number of cells
+        logger: Logger instance
+    
+    Returns:
+        Dictionary with metadata for grouping
+    """
+    metadata = {}
+    obs_group = h5_file['/obs']
+    
+    if logger:
+        logger.info(f"Loading {len(group_columns)} grouping columns...")
+    
+    for col in tqdm(group_columns, desc="Loading metadata", disable=not logger):
+        if col not in obs_group:
+            raise ValueError(f"Column '{col}' not found in .obs")
+        
+        # Check if it's a categorical column
+        if f'{col}/codes' in obs_group:
+            # Categorical column - more memory efficient
+            codes = obs_group[f'{col}/codes'][:]
+            categories = obs_group[f'{col}/categories'][:]
+            
+            # Decode categories if they're bytes
+            if categories.dtype.kind == 'S':
+                categories = [c.decode('utf-8') if isinstance(c, bytes) else c for c in categories]
+            
+            metadata[col] = {
+                'codes': codes,
+                'categories': np.array(categories),
+                'type': 'categorical'
+            }
+            
+            if logger:
+                n_missing = np.sum(codes < 0)
+                if n_missing > 0:
+                    logger.warning(f"Column '{col}' has {n_missing:,} missing values")
+        else:
+            # Direct column
+            data = obs_group[col][:]
+            
+            # Decode if bytes
+            if data.dtype.kind == 'S':
+                data = np.array([d.decode('utf-8') if isinstance(d, bytes) else d for d in data])
+            
+            metadata[col] = {
+                'data': data,
+                'type': 'direct'
+            }
+    
+    return metadata
+
+
+def get_group_key(cell_idx, group_columns, metadata):
+    """
+    Get the group key for a specific cell.
+    
+    Args:
+        cell_idx: Cell index
+        group_columns: List of grouping columns
+        metadata: Metadata dictionary from load_grouping_metadata
+    
+    Returns:
+        Tuple representing the group key, or None if missing values
+    """
+    group_key = []
+    
+    for col in group_columns:
+        if metadata[col]['type'] == 'categorical':
+            code = metadata[col]['codes'][cell_idx]
+            if code < 0:  # Missing value
+                return None
+            value = metadata[col]['categories'][code]
+        else:
+            value = metadata[col]['data'][cell_idx]
+            if value is None or (isinstance(value, float) and np.isnan(value)):
+                return None
+        
+        group_key.append(str(value))
+    
+    return tuple(group_key)
+
+
+def accumulate_centroids_streaming(h5_file, metadata, group_columns, chunk_size, logger=None):
+    """
+    Stream through data with progress tracking and memory monitoring.
+    
+    Args:
+        h5_file: Open h5py file handle
+        metadata: Metadata dictionary from load_grouping_metadata
+        group_columns: List of grouping columns
+        chunk_size: Number of cells to process at once
+        logger: Logger instance
+    
+    Returns:
+        Dictionary with accumulated statistics for each group
+    """
+    n_cells = h5_file['/obs/_index'].shape[0]
+    obsm_slots = list(h5_file['/obsm'].keys())
+    
+    if logger:
+        logger.info(f"Processing {n_cells:,} cells with {len(obsm_slots)} embedding slots")
+        logger.info(f"Using chunk size: {chunk_size:,}")
+    
+    # Initialize accumulator
     group_stats = defaultdict(lambda: defaultdict(lambda: {'sum': None, 'count': 0}))
     
-    n_cells = adata.n_obs
-    progress_interval = max(1000, n_cells // 100)  # Report progress every 1% or 1000 cells
+    # Progress tracking
+    n_chunks = (n_cells + chunk_size - 1) // chunk_size
+    chunk_progress = tqdm(
+        total=n_chunks, 
+        desc="Processing chunks", 
+        unit="chunks",
+        disable=not logger
+    )
     
-    # Single pass through all cells
     skipped_cells = 0
+    last_memory_report = 0
     
-    # Create progress bar
-    progress_bar = tqdm(total=n_cells, desc="Processing cells", unit="cells") if logger else None
-    
-    for cell_idx in range(n_cells):
-        # Get group key from categorical columns
-        group_values = []
-        has_missing = False
+    for chunk_start in range(0, n_cells, chunk_size):
+        chunk_end = min(chunk_start + chunk_size, n_cells)
+        chunk_cells = chunk_end - chunk_start
         
-        for col in group_columns:
-            value = adata.obs.iloc[cell_idx][col]
-            if pd.isna(value):
-                has_missing = True
-                break
-            group_values.append(str(value))  # Convert to string for consistent hashing
+        # Build group keys for chunk
+        chunk_groups = []
+        for i in range(chunk_start, chunk_end):
+            group_key = get_group_key(i, group_columns, metadata)
+            if group_key is None:
+                skipped_cells += 1
+            chunk_groups.append(group_key)
         
-        # Skip cells with missing values in grouping columns
-        if has_missing:
-            skipped_cells += 1
-            continue
-            
-        group_key = tuple(group_values)
-        
-        # Process each .obsm slot
-        for obsm_name, embedding_matrix in adata.obsm.items():
-            cell_embedding = embedding_matrix[cell_idx]
-            
-            # Initialize sum array if this is the first cell for this group/obsm combination
-            if group_stats[group_key][obsm_name]['sum'] is None:
-                group_stats[group_key][obsm_name]['sum'] = np.zeros_like(cell_embedding, dtype=np.float64)
+        # Process each embedding slot
+        for slot in obsm_slots:
+            # Load chunk of embeddings (triggers decompression only for this chunk)
+            embeddings = h5_file[f'/obsm/{slot}'][chunk_start:chunk_end]
             
             # Accumulate
-            group_stats[group_key][obsm_name]['sum'] += cell_embedding.astype(np.float64)
-            group_stats[group_key][obsm_name]['count'] += 1
+            for i, group_key in enumerate(chunk_groups):
+                if group_key is None:
+                    continue
+                
+                embedding = embeddings[i]
+                
+                if group_stats[group_key][slot]['sum'] is None:
+                    group_stats[group_key][slot]['sum'] = np.zeros_like(embedding, dtype=np.float64)
+                
+                group_stats[group_key][slot]['sum'] += embedding.astype(np.float64)
+                group_stats[group_key][slot]['count'] += 1
         
-        # Update progress bar
-        if progress_bar:
+        # Update progress
+        chunk_progress.update(1)
+        
+        # Report memory periodically
+        if chunk_start // chunk_size % 10 == 0 or chunk_start == 0:
+            mem_gb = psutil.Process().memory_info().rss / 1024**3
             n_groups = len(group_stats)
-            progress_bar.set_postfix({
-                'groups': n_groups,
-                'skipped': skipped_cells
+            chunk_progress.set_postfix({
+                'Memory': f'{mem_gb:.1f}GB',
+                'Groups': n_groups,
+                'Skipped': skipped_cells
             })
-            progress_bar.update(1)
+        
+        # Force garbage collection periodically
+        if chunk_start // chunk_size % 50 == 0:
+            gc.collect()
     
-    # Close progress bar
-    if progress_bar:
-        progress_bar.close()
+    chunk_progress.close()
     
     if logger:
-        total_groups = len(group_stats)
-        processed_cells = n_cells - skipped_cells
-        logger.info(f"Accumulation complete: {total_groups} unique groups found")
+        logger.info(f"Found {len(group_stats)} unique groups")
         if skipped_cells > 0:
-            logger.info(f"  Processed cells: {processed_cells:,} (skipped {skipped_cells:,} with missing values)")
-        else:
-            logger.info(f"  Processed cells: {processed_cells:,}")
+            logger.info(f"Skipped {skipped_cells:,} cells with missing values")
     
     return dict(group_stats)
 
@@ -252,15 +301,14 @@ def compute_centroids(group_stats, logger=None):
     Compute centroids from accumulated group statistics.
     
     Args:
-        group_stats: Dictionary from accumulate_group_statistics
+        group_stats: Dictionary from accumulate_centroids_streaming
+        logger: Logger instance
         
     Returns:
         tuple: (group_keys, centroids_dict)
-            group_keys: list of group key tuples
-            centroids_dict: {obsm_name: array of centroids}
     """
     if logger:
-        logger.info("Computing centroids...")
+        logger.info("Computing centroids from accumulated statistics...")
     
     group_keys = list(group_stats.keys())
     n_groups = len(group_keys)
@@ -278,227 +326,109 @@ def compute_centroids(group_stats, logger=None):
     for obsm_name in obsm_names:
         # Get the dimensionality from the first group
         first_sum = first_group[obsm_name]['sum']
+        if first_sum is None:
+            continue
+            
         embedding_dim = first_sum.shape[0] if first_sum.ndim == 1 else first_sum.shape
         
-        # Create centroid array: (n_groups, embedding_dim)
+        # Create centroid array
         if isinstance(embedding_dim, int):
-            centroids_dict[obsm_name] = np.zeros((n_groups, embedding_dim), dtype=np.float64)
+            centroids_dict[obsm_name] = np.zeros((n_groups, embedding_dim), dtype=np.float32)
         else:
-            centroids_dict[obsm_name] = np.zeros((n_groups,) + embedding_dim, dtype=np.float64)
+            centroids_dict[obsm_name] = np.zeros((n_groups,) + embedding_dim, dtype=np.float32)
     
-    # Compute centroids for each group with progress tracking
-    centroid_progress = tqdm(total=n_groups, desc="Computing centroids", unit="groups") if logger and n_groups > 50 else None
-    
-    if logger and n_groups > 100:
-        logger.info(f"Computing centroids for {n_groups:,} groups across {len(obsm_names)} .obsm slots...")
-    
-    for group_idx, group_key in enumerate(group_keys):
+    # Compute centroids for each group
+    for group_idx, group_key in enumerate(tqdm(group_keys, desc="Computing centroids", disable=not logger)):
         group_data = group_stats[group_key]
         
         for obsm_name in obsm_names:
             stats = group_data[obsm_name]
-            if stats['count'] > 0:
+            if stats['count'] > 0 and stats['sum'] is not None:
                 centroid = stats['sum'] / stats['count']
-                centroids_dict[obsm_name][group_idx] = centroid
-            else:
-                # This shouldn't happen, but handle gracefully
-                if logger:
-                    logger.warning(f"Group {group_key} has no cells for {obsm_name}")
-                else:
-                    print(f"WARNING: Group {group_key} has no cells for {obsm_name}")
-        
-        # Update progress bar
-        if centroid_progress:
-            centroid_progress.set_postfix({
-                'obsm_slots': len(obsm_names)
-            })
-            centroid_progress.update(1)
-    
-    # Close progress bar
-    if centroid_progress:
-        centroid_progress.close()
+                centroids_dict[obsm_name][group_idx] = centroid.astype(np.float32)
     
     if logger:
-        logger.info(f"Centroids computed for {n_groups} groups across {len(obsm_names)} .obsm slots")
-        for obsm_name in obsm_names:
-            shape = centroids_dict[obsm_name].shape
-            logger.info(f"  {obsm_name}: {shape}")
+        logger.info(f"Computed centroids for {n_groups} groups across {len(obsm_names)} .obsm slots")
     
     return group_keys, centroids_dict
 
 
-def accumulate_group_statistics_chunked(adata, group_columns, chunk_size, logger=None):
+def create_output_h5ad(group_keys, centroids_dict, group_columns, input_file, output_file, logger=None):
     """
-    Chunked version of single-pass algorithm for large files.
-    
-    Args:
-        adata: AnnData object (can be backed)
-        group_columns: List of grouping column names
-        chunk_size: Number of cells to process per chunk
-        verbose: Whether to show progress
-    
-    Returns:
-        dict: {group_key: {obsm_name: {'sum': array, 'count': int}}}
-    """
-    if logger:
-        logger.info(f"Starting chunked accumulation (chunk size: {chunk_size:,})...")
-    
-    # Initialize statistics dictionary
-    group_stats = defaultdict(lambda: defaultdict(lambda: {'sum': None, 'count': 0}))
-    
-    n_cells = adata.n_obs
-    n_chunks = (n_cells + chunk_size - 1) // chunk_size  # Ceiling division
-    total_skipped_cells = 0
-    
-    # Create progress bar for chunks
-    chunk_progress = tqdm(total=n_chunks, desc="Processing chunks", unit="chunks") if logger else None
-    
-    for chunk_idx in range(n_chunks):
-        start_idx = chunk_idx * chunk_size
-        end_idx = min(start_idx + chunk_size, n_cells)
-        chunk_cells = end_idx - start_idx
-        chunk_skipped = 0
-        
-        if logger:
-            progress = (chunk_idx + 1) / n_chunks * 100
-            logger.info(f"  Processing chunk {chunk_idx + 1}/{n_chunks} ({progress:.1f}%): cells {start_idx:,}-{end_idx-1:,}")
-        
-        # Process chunk of cells
-        for cell_idx in range(start_idx, end_idx):
-            # Get group key from categorical columns
-            group_values = []
-            has_missing = False
-            
-            for col in group_columns:
-                value = adata.obs.iloc[cell_idx][col]
-                if pd.isna(value):
-                    has_missing = True
-                    break
-                group_values.append(str(value))
-            
-            # Skip cells with missing values in grouping columns
-            if has_missing:
-                chunk_skipped += 1
-                continue
-                
-            group_key = tuple(group_values)
-            
-            # Process each .obsm slot
-            for obsm_name, embedding_matrix in adata.obsm.items():
-                cell_embedding = embedding_matrix[cell_idx]
-                
-                # Initialize sum array if this is the first cell for this group/obsm combination
-                if group_stats[group_key][obsm_name]['sum'] is None:
-                    group_stats[group_key][obsm_name]['sum'] = np.zeros_like(cell_embedding, dtype=np.float64)
-                
-                # Accumulate
-                group_stats[group_key][obsm_name]['sum'] += cell_embedding.astype(np.float64)
-                group_stats[group_key][obsm_name]['count'] += 1
-        
-        # Update totals
-        total_skipped_cells += chunk_skipped
-        
-        # Update progress bar
-        if chunk_progress:
-            n_groups = len(group_stats)
-            chunk_processed = chunk_cells - chunk_skipped
-            chunk_progress.set_postfix({
-                'groups': n_groups,
-                'processed': f"{chunk_processed}/{chunk_cells}",
-                'total_skipped': total_skipped_cells
-            })
-            chunk_progress.update(1)
-        
-        # Force garbage collection after each chunk to manage memory
-        gc.collect()
-    
-    # Close progress bar
-    if chunk_progress:
-        chunk_progress.close()
-    
-    if logger:
-        total_groups = len(group_stats)
-        total_processed = n_cells - total_skipped_cells
-        logger.info(f"Chunked accumulation complete: {total_groups} unique groups found")
-        if total_skipped_cells > 0:
-            logger.info(f"  Processed cells: {total_processed:,} (skipped {total_skipped_cells:,} with missing values)")
-        else:
-            logger.info(f"  Processed cells: {total_processed:,}")
-    
-    return dict(group_stats)
-
-
-def create_output_anndata(group_keys, centroids_dict, group_columns, input_adata, logger=None):
-    """
-    Create output AnnData object with centroids.
+    Create output H5AD file with centroids using h5py.
     
     Args:
         group_keys: List of group key tuples
         centroids_dict: Dictionary of centroid arrays
         group_columns: List of grouping column names
-        input_adata: Original AnnData object for metadata
-        
-    Returns:
-        AnnData: New AnnData object with centroids
+        input_file: Path to input file (for metadata)
+        output_file: Path to output file
+        logger: Logger instance
     """
     if logger:
-        logger.info("Creating output AnnData object...")
+        logger.info(f"Creating output file: {output_file}")
     
     n_groups = len(group_keys)
     
-    # Create .obs DataFrame for groups
-    obs_data = {}
-    for col_idx, col_name in enumerate(group_columns):
-        obs_data[col_name] = [group_key[col_idx] for group_key in group_keys]
-    
-    obs_df = pd.DataFrame(obs_data)
-    obs_df.index = [f"group_{i}" for i in range(n_groups)]
-    
-    # Create dummy .X matrix (required by AnnData)
-    # Use the first .obsm slot dimensions, or create minimal matrix
-    if centroids_dict:
-        first_obsm = list(centroids_dict.values())[0]
-        X = np.zeros((n_groups, 1), dtype=np.float32)  # Minimal .X
-    else:
-        X = np.zeros((n_groups, 1), dtype=np.float32)
-    
-    # Create AnnData object
-    adata_out = sc.AnnData(X=X, obs=obs_df)
-    
-    # Add .obsm centroids
-    for obsm_name, centroids in centroids_dict.items():
-        adata_out.obsm[obsm_name] = centroids.astype(np.float32)  # Convert to float32 to save space
-    
-    # Copy relevant metadata from input
-    if hasattr(input_adata, 'uns') and input_adata.uns:
-        adata_out.uns = input_adata.uns.copy()
-    
-    # Add processing metadata
-    adata_out.uns['centroid_computation'] = {
-        'group_columns': group_columns,
-        'n_input_cells': input_adata.n_obs,
-        'n_output_groups': n_groups,
-        'obsm_slots': list(centroids_dict.keys())
-    }
+    with h5py.File(output_file, 'w') as f_out:
+        # Create minimal X (required by AnnData spec) - empty sparse matrix
+        X_group = f_out.create_group('X')
+        X_group.create_dataset('data', data=np.array([], dtype=np.float32))
+        X_group.create_dataset('indices', data=np.array([], dtype=np.int32))
+        X_group.create_dataset('indptr', data=np.zeros(n_groups + 1, dtype=np.int32))
+        
+        # Create obs (group metadata)
+        obs_group = f_out.create_group('obs')
+        obs_index = [f'group_{i}' for i in range(n_groups)]
+        obs_group.create_dataset('_index', data=np.array(obs_index, dtype='S'))
+        
+        # Add grouping columns
+        for col_idx, col_name in enumerate(group_columns):
+            values = [group_key[col_idx] for group_key in group_keys]
+            
+            # Store as categorical for efficiency
+            unique_values = sorted(list(set(values)))
+            value_to_code = {v: i for i, v in enumerate(unique_values)}
+            codes = [value_to_code[v] for v in values]
+            
+            col_group = obs_group.create_group(col_name)
+            col_group.create_dataset('codes', data=np.array(codes, dtype=np.int32))
+            
+            # Store categories as strings
+            cat_data = np.array(unique_values, dtype='S')
+            col_group.create_dataset('categories', data=cat_data)
+        
+        # Create obsm (centroids)
+        obsm_group = f_out.create_group('obsm')
+        for slot_name, centroids in centroids_dict.items():
+            # Store without compression for fast access
+            obsm_group.create_dataset(slot_name, data=centroids, chunks=None)
+        
+        # Create minimal var (required by AnnData spec)
+        var_group = f_out.create_group('var')
+        var_group.create_dataset('_index', data=np.array(['dummy'], dtype='S'))
+        
+        # Create minimal uns
+        uns_group = f_out.create_group('uns')
+        
+        # Add metadata about the computation
+        uns_group.attrs['centroid_computation'] = True
+        uns_group.attrs['n_input_cells'] = len(group_keys)  # Will be updated if we have access
+        uns_group.attrs['n_output_groups'] = n_groups
+        uns_group.attrs['group_columns'] = ','.join(group_columns)
+        uns_group.attrs['obsm_slots'] = ','.join(list(centroids_dict.keys()))
+        
+        # Try to get input cell count
+        try:
+            with h5py.File(input_file, 'r') as f_in:
+                uns_group.attrs['n_input_cells'] = f_in['/obs/_index'].shape[0]
+        except:
+            pass
     
     if logger:
-        logger.info(f"Output AnnData created:")
+        logger.info(f"Output file created successfully")
         logger.info(f"  Groups: {n_groups}")
-        logger.info(f"  .obsm slots: {list(centroids_dict.keys())}")
-        logger.info(f"  Grouping columns: {group_columns}")
-    
-    return adata_out
-
-
-def setup_logging(verbose=False):
-    """Setup logging with timestamps."""
-    level = logging.INFO if verbose else logging.WARNING
-    logging.basicConfig(
-        level=level,
-        format='%(asctime)s - %(levelname)s - %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S'
-    )
-    return logging.getLogger(__name__)
+        logger.info(f"  Embedding slots: {list(centroids_dict.keys())}")
 
 
 def main():
@@ -513,6 +443,12 @@ def main():
         logger.error(f"Input file does not exist: {args.input_file}")
         sys.exit(1)
     
+    # Create output directory if needed
+    output_dir = os.path.dirname(args.output_file)
+    if output_dir and not os.path.exists(output_dir):
+        os.makedirs(output_dir, exist_ok=True)
+        logger.info(f"Created output directory: {output_dir}")
+    
     # Check file size
     file_size_gb = get_file_size_gb(args.input_file)
     logger.info(f"Input file size: {file_size_gb:.2f} GB")
@@ -521,75 +457,89 @@ def main():
     available_memory_gb = psutil.virtual_memory().available / (1024**3)
     logger.info(f"Available memory: {available_memory_gb:.2f} GB")
     
-    # Load file with memory checking
-    logger.info("Loading .h5ad file...")
     try:
-        # For very large files, warn about memory usage
-        if file_size_gb > args.memory_limit_gb:
-            logger.warning(f"File size ({file_size_gb:.2f} GB) exceeds memory limit ({args.memory_limit_gb:.2f} GB)")
-            logger.warning("Will attempt to load and use chunked processing if needed")
+        # Open file with h5py
+        logger.info(f"Opening {args.input_file} with h5py...")
         
-        adata = sc.read_h5ad(args.input_file, backed='r')  # Read-only backed mode for large files
-        
-        # Estimate memory usage for processing
-        memory_estimate_gb, obsm_info = estimate_memory_usage(adata, verbose=args.verbose)
-        
-        # Validate input
-        if not validate_input(adata, args.group_by, logger=logger):
-            sys.exit(1)
-        
-        # Decide on processing strategy
-        use_chunked = memory_estimate_gb > args.memory_limit_gb or file_size_gb > args.memory_limit_gb
-        
-        if use_chunked:
-            logger.info(f"Using chunked processing (chunk size: {args.chunk_size:,} cells)")
+        with h5py.File(args.input_file, 'r') as h5_file:
+            # Get basic info
+            n_cells = h5_file['/obs/_index'].shape[0]
+            obsm_slots = list(h5_file['/obsm'].keys())
             
-            # Chunked single-pass algorithm
-            group_stats = accumulate_group_statistics_chunked(adata, args.group_by, args.chunk_size, logger=logger)
+            logger.info(f"File info:")
+            logger.info(f"  Cells: {n_cells:,}")
+            logger.info(f"  .obsm slots: {obsm_slots}")
+            
+            # Determine chunk size
+            if args.chunk_size is None:
+                if obsm_slots:
+                    # Use first obsm slot to determine HDF5 chunk alignment
+                    chunk_size = get_optimal_chunk_size(
+                        h5_file, 
+                        f'/obsm/{obsm_slots[0]}',
+                        target_chunk_size=1000000
+                    )
+                else:
+                    chunk_size = 1000000
+            else:
+                chunk_size = args.chunk_size
+            
+            logger.info(f"Using chunk size: {chunk_size:,}")
+            
+            # Check compression
+            if obsm_slots and logger:
+                first_obsm = h5_file[f'/obsm/{obsm_slots[0]}']
+                if first_obsm.compression:
+                    logger.info(f"Note: Data is compressed with {first_obsm.compression}")
+            
+            # Load metadata
+            metadata = load_grouping_metadata(
+                h5_file, 
+                args.group_by, 
+                n_cells,
+                logger
+            )
+            
+            # Process data
+            group_stats = accumulate_centroids_streaming(
+                h5_file,
+                metadata,
+                args.group_by,
+                chunk_size,
+                logger
+            )
             
             # Check if any groups were found
             if len(group_stats) == 0:
                 logger.error("No valid groups found in the data")
                 sys.exit(1)
-            
-            # Compute centroids
-            group_keys, centroids_dict = compute_centroids(group_stats, logger=logger)
-            
-            # Create output AnnData
-            adata_out = create_output_anndata(group_keys, centroids_dict, args.group_by, adata, logger=logger)
-            
-            # Save output
-            logger.info(f"Saving output to {args.output_file}...")
-            adata_out.write_h5ad(args.output_file)
-            
-            logger.info(f"Output file size: {get_file_size_gb(args.output_file):.3f} GB")
-        else:
-            logger.info("Using full-memory processing")
-            # Load everything into memory for faster processing
-            adata = adata.to_memory()
-            
-            # Single-pass algorithm
-            group_stats = accumulate_group_statistics(adata, args.group_by, logger=logger)
-            
-            # Check if any groups were found
-            if len(group_stats) == 0:
-                logger.error("No valid groups found in the data")
-                sys.exit(1)
-            
-            # Compute centroids
-            group_keys, centroids_dict = compute_centroids(group_stats, logger=logger)
-            
-            # Create output AnnData
-            adata_out = create_output_anndata(group_keys, centroids_dict, args.group_by, adata, logger=logger)
-            
-            # Save output
-            logger.info(f"Saving output to {args.output_file}...")
-            adata_out.write_h5ad(args.output_file)
-            
-            logger.info(f"Output file size: {get_file_size_gb(args.output_file):.3f} GB")
+        
+        # Compute centroids
+        group_keys, centroids_dict = compute_centroids(group_stats, logger)
+        
+        # Create output file
+        create_output_h5ad(
+            group_keys,
+            centroids_dict,
+            args.group_by,
+            args.input_file,
+            args.output_file,
+            logger
+        )
+        
+        # Report output size
+        output_size_gb = get_file_size_gb(args.output_file)
+        logger.info(f"Output file size: {output_size_gb:.3f} GB")
+        
+        # Final memory report
+        final_memory_gb = psutil.Process().memory_info().rss / 1024**3
+        logger.info(f"Peak memory usage: {final_memory_gb:.1f} GB")
         
     except Exception as e:
-        logger.error(f"Failed to load or process file: {str(e)}")
+        logger.error(f"Failed to process file: {str(e)}")
+        import traceback
+        if args.verbose:
+            traceback.print_exc()
         sys.exit(1)
     
     logger.info("Processing completed successfully!")
