@@ -193,186 +193,6 @@ class MeanShiftTable:
         return df.sort_values('shift_magnitude', ascending=False)
 
 
-def evaluate_mean_shift_baseline(
-    adata_test_path: str,
-    shift_table: MeanShiftTable,
-    control_pert: str = "non-targeting",
-    cell_type_col: str = "cell_type",
-    pert_col: str = "target_gene",
-    embed_key: Optional[str] = None
-) -> Dict:
-    """
-    Evaluate mean shift baseline on test data.
-
-    For each (cell_type, perturbation) combination:
-    1. Get all control cells of that cell type
-    2. Apply the mean shift to each control cell
-    3. Compare predictions to actual perturbed cells with the same (cell_type, perturbation)
-
-    Parameters
-    ----------
-    adata_test_path : str
-        Path to test dataset h5ad file
-    shift_table : MeanShiftTable
-        Pre-computed mean shift table
-    control_pert : str
-        Name of control perturbation
-    cell_type_col : str
-        Column name for cell types
-    pert_col : str
-        Column name for perturbations
-    embed_key : str or None
-        Key in adata.obsm for embeddings
-
-    Returns
-    -------
-    results : dict
-        Dictionary with evaluation metrics and predictions
-    """
-    print("\n" + "="*60)
-    print("EVALUATING MEAN SHIFT BASELINE")
-    print("="*60)
-    print(f"Loading test data from: {adata_test_path}")
-
-    # Load data
-    adata_test = sc.read_h5ad(adata_test_path)
-
-    # Get embeddings
-    if embed_key and embed_key in adata_test.obsm:
-        embeddings = adata_test.obsm[embed_key]
-        print(f"Using embeddings from adata_test.obsm['{embed_key}']")
-    else:
-        try:
-            embeddings = adata_test.X.toarray()
-        except:
-            embeddings = adata_test.X
-        print(f"Using embeddings from adata_test.X")
-
-    print(f"Test data shape: {embeddings.shape}")
-
-    cell_types = adata_test.obs[cell_type_col].values
-    perturbations = adata_test.obs[pert_col].values
-
-    all_predictions = []
-    all_ground_truth = []
-    all_cell_types = []
-    all_perturbations = []
-
-    # For each (cell_type, perturbation) pair
-    unique_cell_types = np.unique(cell_types)
-    unique_perts = np.unique(perturbations)
-
-    print(f"\nProcessing {len(unique_cell_types)} cell types × {len(unique_perts)} perturbations")
-
-    n_comparisons = 0
-    n_skipped = 0
-
-    for cell_type in tqdm(unique_cell_types, desc="Cell types"):
-        for pert in unique_perts:
-            if pert == control_pert:
-                continue  # Skip control
-
-            # Get control cells for this cell type
-            control_mask = (cell_types == cell_type) & (perturbations == control_pert)
-            control_cells = embeddings[control_mask]  # [n_control, D]
-
-            # Get perturbed cells for this (cell_type, pert)
-            pert_mask = (cell_types == cell_type) & (perturbations == pert)
-            pert_cells = embeddings[pert_mask]  # [n_pert, D]
-
-            if control_cells.shape[0] == 0 or pert_cells.shape[0] == 0:
-                n_skipped += 1
-                continue  # Skip if no data
-
-            # Get the mean shift for this combination
-            key = (cell_type, pert)
-            if key not in shift_table.shifts:
-                n_skipped += 1
-                continue  # Skip if we didn't compute this shift
-
-            shift = shift_table.shifts[key]  # [D]
-
-            # Apply shift to EACH control cell
-            # predictions shape: [n_control, D]
-            predictions = control_cells + shift  # Broadcasting
-
-            # Match sizes: we have n_control predictions and n_pert ground truths
-            n_control = control_cells.shape[0]
-            n_pert = pert_cells.shape[0]
-
-            # Take minimum to ensure equal sizes
-            n_samples = min(n_control, n_pert)
-            predictions = predictions[:n_samples]
-            ground_truth = pert_cells[:n_samples]
-
-            # Store
-            all_predictions.append(predictions)
-            all_ground_truth.append(ground_truth)
-            all_cell_types.extend([cell_type] * n_samples)
-            all_perturbations.extend([pert] * n_samples)
-
-            n_comparisons += n_samples
-
-    if len(all_predictions) == 0:
-        print("\nERROR: No predictions could be made!")
-        return {}
-
-    # Concatenate all predictions and ground truths
-    all_predictions = np.vstack(all_predictions)  # [total_n, D]
-    all_ground_truth = np.vstack(all_ground_truth)  # [total_n, D]
-
-    print(f"\nTotal predictions: {all_predictions.shape[0]}")
-    print(f"Skipped combinations: {n_skipped}")
-
-    # Compute overall MSE
-    overall_mse = np.mean((all_predictions - all_ground_truth) ** 2)
-
-    print(f"\n{'='*60}")
-    print(f"RESULTS")
-    print(f"{'='*60}")
-    print(f"Overall MSE: {overall_mse:.6f}")
-
-    # Compute per cell type MSE
-    print(f"\nPer Cell Type MSE:")
-    per_celltype_mse = {}
-    for ct in unique_cell_types:
-        ct_mask = np.array(all_cell_types) == ct
-        if ct_mask.sum() > 0:
-            ct_mse = np.mean((all_predictions[ct_mask] - all_ground_truth[ct_mask]) ** 2)
-            per_celltype_mse[ct] = ct_mse
-            print(f"  {ct}: {ct_mse:.6f} ({ct_mask.sum()} predictions)")
-
-    # Compute per perturbation MSE
-    print(f"\nTop 10 Perturbations by MSE:")
-    per_pert_mse = {}
-    for pert in unique_perts:
-        if pert == control_pert:
-            continue
-        pert_mask = np.array(all_perturbations) == pert
-        if pert_mask.sum() > 0:
-            pert_mse = np.mean((all_predictions[pert_mask] - all_ground_truth[pert_mask]) ** 2)
-            per_pert_mse[pert] = pert_mse
-
-    # Sort and show top 10
-    sorted_perts = sorted(per_pert_mse.items(), key=lambda x: x[1], reverse=True)
-    for pert, mse in sorted_perts[:10]:
-        n = np.sum(np.array(all_perturbations) == pert)
-        print(f"  {pert}: {mse:.6f} ({n} predictions)")
-
-    results = {
-        'overall_mse': overall_mse,
-        'per_celltype_mse': per_celltype_mse,
-        'per_perturbation_mse': per_pert_mse,
-        'n_predictions': all_predictions.shape[0],
-        'predictions': all_predictions,
-        'ground_truth': all_ground_truth,
-        'cell_types': all_cell_types,
-        'perturbations': all_perturbations
-    }
-
-    return results
-
-
 def create_pred_h5ad_for_mmd(
     adata_test_path: str,
     shift_table: MeanShiftTable,
@@ -521,21 +341,18 @@ if __name__ == "__main__":
     # print(stats.head(10))
     # stats.to_csv("mean_shift_statistics.csv", index=False)
 
-    print("\n[2/3] Evaluating on test data...")
+    print("\n[2/2] Creating pred.h5ad for MMD evaluation...")
 
     # Uncomment and set your actual paths:
-    # results = evaluate_mean_shift_baseline(
+    # create_pred_h5ad_for_mmd(
     #     adata_test_path="path/to/test_data.h5ad",
     #     shift_table=shift_table,
+    #     output_path="pred_lms.h5ad",
     #     control_pert="non-targeting",
     #     cell_type_col="cell_type",
     #     pert_col="target_gene",
     #     embed_key="X_hvg"
     # )
-
-    # Save results
-    # with open("mean_shift_results.pkl", "wb") as f:
-    #     pickle.dump(results, f)
 
     print("\n" + "="*60)
     print("Example complete! Uncomment code to run on real data.")
