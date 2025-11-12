@@ -373,6 +373,126 @@ def evaluate_mean_shift_baseline(
     return results
 
 
+def create_pred_h5ad_for_mmd(
+    adata_test_path: str,
+    shift_table: MeanShiftTable,
+    output_path: str,
+    control_pert: str = "non-targeting",
+    cell_type_col: str = "cell_type",
+    pert_col: str = "target_gene",
+    embed_key: Optional[str] = None,
+    pred_embed_key: str = "model_preds"
+):
+    """
+    Create a pred.h5ad file compatible with mmd_anndata_pair.py.
+
+    This function applies mean shift predictions to all cells in the test set
+    and saves them in a format that matches what State model outputs.
+
+    For each cell:
+    - If it's a control cell: Keep original embedding (no shift)
+    - If it's a perturbed cell: Apply mean shift based on (cell_type, perturbation)
+
+    The output h5ad file will have:
+    - Same structure as input (same .obs metadata, same cells)
+    - Predictions stored in .obsm[pred_embed_key]
+
+    Parameters
+    ----------
+    adata_test_path : str
+        Path to test dataset h5ad file
+    shift_table : MeanShiftTable
+        Pre-computed mean shift table from training data
+    output_path : str
+        Path to save the output pred_lms.h5ad file
+    control_pert : str
+        Name of control perturbation
+    cell_type_col : str
+        Column name for cell types
+    pert_col : str
+        Column name for perturbations
+    embed_key : str or None
+        Key in adata.obsm for input embeddings (None = use adata.X)
+    pred_embed_key : str
+        Key name for storing predictions in output .obsm
+
+    Returns
+    -------
+    None
+        Saves output file to output_path
+    """
+    print("\n" + "="*60)
+    print("CREATING PRED.H5AD FOR MMD EVALUATION")
+    print("="*60)
+    print(f"Input: {adata_test_path}")
+    print(f"Output: {output_path}")
+
+    # Load test data
+    adata = sc.read_h5ad(adata_test_path)
+    print(f"\nData shape: {adata.shape}")
+
+    # Get embeddings
+    if embed_key and embed_key in adata.obsm:
+        embeddings = adata.obsm[embed_key]
+        print(f"Using input embeddings from adata.obsm['{embed_key}']")
+    else:
+        try:
+            embeddings = adata.X.toarray()
+        except:
+            embeddings = adata.X
+        print(f"Using input embeddings from adata.X")
+
+    # Make a copy for predictions
+    predictions = np.copy(embeddings)
+
+    cell_types = adata.obs[cell_type_col].values
+    perturbations = adata.obs[pert_col].values
+
+    # Apply mean shifts to each cell
+    n_shifted = 0
+    n_no_shift = 0
+    n_control = 0
+
+    print(f"\nApplying mean shifts to {len(adata)} cells...")
+
+    for i in tqdm(range(len(adata)), desc="Processing cells"):
+        cell_type = cell_types[i]
+        pert = perturbations[i]
+
+        # Skip control cells - they stay as is
+        if pert == control_pert:
+            n_control += 1
+            continue
+
+        # Look up the shift for this (cell_type, perturbation)
+        key = (cell_type, pert)
+
+        if key in shift_table.shifts:
+            # Apply mean shift
+            shift = shift_table.shifts[key]
+            predictions[i] = embeddings[i] + shift
+            n_shifted += 1
+        else:
+            # No shift available - keep original embedding
+            n_no_shift += 1
+
+    print(f"\nProcessing complete:")
+    print(f"  Control cells (unchanged): {n_control}")
+    print(f"  Cells with mean shift applied: {n_shifted}")
+    print(f"  Cells without available shift: {n_no_shift}")
+
+    # Store predictions in .obsm
+    adata.obsm[pred_embed_key] = predictions
+
+    # Save output
+    print(f"\nSaving predictions to: {output_path}")
+    adata.write_h5ad(output_path)
+
+    print(f"✓ Created {output_path}")
+    print(f"  - Predictions stored in .obsm['{pred_embed_key}']")
+    print(f"  - Ready for mmd_anndata_pair.py comparison")
+
+
 # Example usage
 if __name__ == "__main__":
     print("="*60)
