@@ -20,8 +20,31 @@ This directory contains scripts for evaluating drug response prediction models u
 - **`evaluate_transport_mmd_h5ad_test.py`**: **PRIMARY EVALUATION SCRIPT** - Dual-kernel MMD with technical duplicates
 - **`evaluate_transport_mmd_h5ad.py`**: HuggingFace dataset version (legacy)
 - **`pearson_delta_evaluation.py`**: Gene expression correlation metric
+- **`knn_separability_anndata.py`**: kNN classification separability analysis for drug vs control cells
+- **`mmd_anndata_pair.py`**: Dual-kernel MMD for real vs predicted AnnData pairs
 
 ## Critical Implementation Details
+
+### kNN Separability Analysis
+
+The **`knn_separability_anndata.py`** script provides a simpler alternative to MMD for measuring drug effect separability:
+
+1. **Separability**: kNN classification accuracy between control and drug-treated cells
+   - Measures how well drug effects can be distinguished from controls in embedding space
+   - Values range from 0.0 (no separation) to 1.0 (perfect separation)
+
+2. **Permuted Reference**: Same analysis with shuffled labels
+   - Provides baseline comparison (should be ~0.5 for balanced classes)
+   - Helps assess statistical significance of observed separability
+
+**Key Usage**:
+```bash
+python knn_separability_anndata.py \
+  --adata observed_data.h5ad \
+  --pert-col drug_dose \
+  --control-pert DMSO_TF_00 \
+  --group-by cell_line plate  # Optional: analyze per context
+```
 
 ### MMD Evaluation with Technical Duplicates
 
