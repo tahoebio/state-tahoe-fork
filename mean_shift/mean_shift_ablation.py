@@ -434,6 +434,170 @@ def create_pred_h5ad_for_mmd(
     print(f"  - Ready for mmd_anndata_pair.py comparison")
 
 
+def create_control_passthrough_h5ad(
+    adata_test_path: str,
+    adata_control_path: str,
+    output_path: str,
+    control_pert: str = "non-targeting",
+    pert_col: str = "target_gene",
+    embed_key: Optional[str] = None,
+    pred_embed_key: str = "model_preds",
+    ctrl_barcode_col: str = "ctrl_cell_barcode",
+    is_partitioned: bool = False
+):
+    """
+    Create a "no-shift" baseline pred.h5ad file for MMD evaluation.
+
+    This baseline simply uses the matched control cell embedding without applying any shift.
+    This tests whether mean shift is even better than doing nothing at all.
+
+    For each cell in adata_test:
+    - Look up ctrl_cell_barcode from .obs
+    - Find that control cell in adata_control
+    - Use: pred = control_embedding (NO shift applied)
+
+    Parameters
+    ----------
+    adata_test_path : str
+        Path to test dataset h5ad file (real.h5ad with perturbed cells)
+    adata_control_path : str
+        Path to directory with control dataset (can contain partitioned files) or single h5ad file
+    output_path : str
+        Path to save the output pred_control_passthrough.h5ad file
+    control_pert : str
+        Name of control perturbation
+    pert_col : str
+        Column name for perturbations
+    embed_key : str or None
+        Key in adata.obsm for input embeddings (None = use adata.X)
+    pred_embed_key : str
+        Key name for storing predictions in output .obsm
+    ctrl_barcode_col : str
+        Column name for control cell barcodes in adata_test.obs
+    is_partitioned : bool
+        If True, adata_control_path is a directory with partitioned h5ad files
+
+    Returns
+    -------
+    None
+        Saves output file to output_path
+    """
+    print("\n" + "="*60)
+    print("CREATING CONTROL PASSTHROUGH BASELINE (No Shift)")
+    print("="*60)
+    print(f"Test data (perturbed): {adata_test_path}")
+    print(f"Control data: {adata_control_path}")
+    print(f"Output: {output_path}")
+
+    # Load test data
+    adata_test = sc.read_h5ad(adata_test_path)
+    print(f"\nTest data shape: {adata_test.shape}")
+
+    # Check if ctrl_barcode_col exists
+    if ctrl_barcode_col not in adata_test.obs.columns:
+        raise ValueError(f"Column '{ctrl_barcode_col}' not found in test data")
+
+    # Extract unique control barcodes we need
+    unique_ctrl_barcodes = set(adata_test.obs[ctrl_barcode_col].unique())
+    print(f"\nFound {len(unique_ctrl_barcodes)} unique control cells needed")
+
+    # Load control data (same logic as create_pred_h5ad_for_mmd)
+    control_lookup = {}
+
+    if is_partitioned:
+        print(f"\nLoading control cells from partitioned dataset: {adata_control_path}")
+        partition_files = sorted(glob(f"{adata_control_path}/*.h5ad"))
+
+        if not partition_files:
+            raise FileNotFoundError(f"No h5ad files found in {adata_control_path}")
+
+        print(f"Found {len(partition_files)} partition files")
+
+        for partition_file in tqdm(partition_files, desc="Loading partitions"):
+            try:
+                adata_partition = sc.read_h5ad(partition_file)
+                partition_barcodes = adata_partition.obs.index.values
+                barcodes_in_partition = unique_ctrl_barcodes.intersection(set(partition_barcodes))
+
+                if len(barcodes_in_partition) > 0:
+                    if embed_key and embed_key in adata_partition.obsm:
+                        partition_embeddings = adata_partition.obsm[embed_key]
+                    else:
+                        partition_embeddings = adata_partition.X.toarray() if hasattr(adata_partition.X, 'toarray') else adata_partition.X
+
+                    for i, barcode in enumerate(partition_barcodes):
+                        if barcode in barcodes_in_partition:
+                            control_lookup[barcode] = partition_embeddings[i]
+
+                    print(f"  Found {len(barcodes_in_partition)} needed cells in {Path(partition_file).name}")
+
+                del adata_partition
+            except Exception as e:
+                print(f"  Warning: Could not load {partition_file}: {e}")
+                continue
+
+        print(f"\nLoaded {len(control_lookup)} control cells total")
+
+    else:
+        # Load single control file
+        print(f"Loading control data from: {adata_control_path}")
+        adata_control = sc.read_h5ad(adata_control_path)
+        print(f"Control data shape: {adata_control.shape}")
+
+        if embed_key and embed_key in adata_control.obsm:
+            control_embeddings = adata_control.obsm[embed_key]
+        else:
+            control_embeddings = adata_control.X.toarray() if hasattr(adata_control.X, 'toarray') else adata_control.X
+
+        control_barcodes = adata_control.obs.index.values
+        control_lookup = {barcode: control_embeddings[i] for i, barcode in enumerate(control_barcodes)}
+        print(f"Created lookup for {len(control_lookup)} control cells")
+
+    # Check embedding dimension
+    first_embedding = next(iter(control_lookup.values()))
+    embedding_dim = len(first_embedding)
+
+    # Initialize predictions array
+    predictions = np.zeros((len(adata_test), embedding_dim), dtype=np.float32)
+
+    ctrl_barcodes = adata_test.obs[ctrl_barcode_col].values
+
+    # Simply copy control embeddings (no shift)
+    n_copied = 0
+    n_missing = 0
+
+    print(f"\nCopying control embeddings for {len(adata_test)} cells (NO SHIFT APPLIED)...")
+
+    for i in tqdm(range(len(adata_test)), desc="Processing cells"):
+        ctrl_barcode = ctrl_barcodes[i]
+
+        if ctrl_barcode in control_lookup:
+            predictions[i] = control_lookup[ctrl_barcode]
+            n_copied += 1
+        else:
+            # Fallback: use test cell's own embedding
+            if embed_key and embed_key in adata_test.obsm:
+                predictions[i] = adata_test.obsm[embed_key][i]
+            else:
+                predictions[i] = adata_test.X[i].toarray() if hasattr(adata_test.X[i], 'toarray') else adata_test.X[i]
+            n_missing += 1
+
+    print(f"\nProcessing complete:")
+    print(f"  Control embeddings copied: {n_copied}")
+    print(f"  Cells with missing control barcode: {n_missing}")
+
+    # Store predictions in .obsm
+    adata_test.obsm[pred_embed_key] = predictions
+
+    # Save output
+    print(f"\nSaving predictions to: {output_path}")
+    adata_test.write_h5ad(output_path)
+
+    print(f"✓ Created {output_path}")
+    print(f"  - Predictions stored in .obsm['{pred_embed_key}']")
+    print(f"  - Ready for mmd_anndata_pair.py comparison")
+
+
 # Example usage
 if __name__ == "__main__":
     print("="*60)
