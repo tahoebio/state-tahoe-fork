@@ -254,8 +254,8 @@ def create_pred_h5ad_for_mmd(
         embeddings = adata.X.toarray() if hasattr(adata.X, 'toarray') else adata.X
         print(f"Using embeddings from .X")
 
-    # Create barcode lookup (all cells indexed by barcode)
-    control_lookup = {barcode: embeddings[i] for i, barcode in enumerate(adata.obs.index)}
+    # Create barcode lookup (all cells indexed by pert_cell_barcode)
+    control_lookup = {barcode: embeddings[i] for i, barcode in enumerate(adata.obs['pert_cell_barcode'])}
     print(f"Created lookup for {len(control_lookup)} cells")
 
     # Initialize predictions
@@ -377,8 +377,8 @@ def create_control_passthrough_h5ad(
         embeddings = adata.X.toarray() if hasattr(adata.X, 'toarray') else adata.X
         print(f"Using embeddings from .X")
 
-    # Create barcode lookup
-    control_lookup = {barcode: embeddings[i] for i, barcode in enumerate(adata.obs.index)}
+    # Create barcode lookup (all cells indexed by pert_cell_barcode)
+    control_lookup = {barcode: embeddings[i] for i, barcode in enumerate(adata.obs['pert_cell_barcode'])}
     print(f"Created lookup for {len(control_lookup)} cells")
 
     # Initialize predictions
