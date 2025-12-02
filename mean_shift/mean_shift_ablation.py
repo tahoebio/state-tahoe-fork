@@ -269,8 +269,13 @@ def create_pred_h5ad_for_mmd(
     n_shifted = 0
     n_no_shift = 0
     n_missing_barcode = 0
+    n_found_barcode = 0
 
     print(f"\nApplying mean shifts to {len(adata)} cells...")
+
+    # Debug: Check first few lookups
+    print("\n[DEBUG] First 5 perturbed cells:")
+    debug_count = 0
 
     for i in tqdm(range(len(adata)), desc="Processing cells"):
         pert = perturbations[i]
@@ -283,6 +288,14 @@ def create_pred_h5ad_for_mmd(
             n_control_cells += 1
             continue
 
+        # Debug first 5 perturbed cells
+        if debug_count < 5:
+            in_lookup = ctrl_barcode in control_lookup
+            shift_key = (cell_type, pert)
+            has_shift = shift_key in shift_table.shifts
+            print(f"  Cell {i}: ctrl_barcode='{ctrl_barcode}', in_lookup={in_lookup}, shift_key={shift_key}, has_shift={has_shift}")
+            debug_count += 1
+
         # Perturbed cells: look up control cell and apply shift
         if ctrl_barcode not in control_lookup:
             # Fallback: use cell's own embedding
@@ -290,6 +303,7 @@ def create_pred_h5ad_for_mmd(
             n_missing_barcode += 1
             continue
 
+        n_found_barcode += 1
         control_embedding = control_lookup[ctrl_barcode]
         key = (cell_type, pert)
 
@@ -304,9 +318,17 @@ def create_pred_h5ad_for_mmd(
 
     print(f"\nProcessing complete:")
     print(f"  PBS control cells: {n_control_cells}")
+    print(f"  Control barcodes found in lookup: {n_found_barcode}")
     print(f"  Perturbed cells with shift applied: {n_shifted}")
     print(f"  Perturbed cells without available shift: {n_no_shift}")
     print(f"  Cells with missing control barcode: {n_missing_barcode}")
+
+    # Sanity check
+    total_perturbed = len(adata) - n_control_cells
+    print(f"\n[SANITY CHECK]")
+    print(f"  Total perturbed cells: {total_perturbed}")
+    print(f"  Accounted for: {n_found_barcode + n_missing_barcode}")
+    print(f"  Match: {total_perturbed == n_found_barcode + n_missing_barcode}")
 
     # Store predictions
     adata.obsm[pred_embed_key] = predictions
