@@ -228,12 +228,13 @@ Lower MMD values indicate better prediction quality. We report mean and median M
 
 \subsubsection{Experimental Setup}
 
-We first evaluated all baselines using global processing (ignoring plate boundaries):
+We first evaluated baselines using global processing (ignoring plate boundaries):
 \begin{itemize}
     \item \textbf{Few-shot}: Held-out drugs across multiple cell lines
     \item \textbf{Zero-shot}: Held-out cell lines (all drugs)
     \item \textbf{Scale correction}: Applied only to zero-shot training centroids ($\div 40$)
-    \item \textbf{Baselines}: Control Passthrough, Mean Shift Ablation, Nearest-Cell-Line, Cross-Cell-Line V2, State Model
+    \item \textbf{Cross-cell-line approach}: DMSO-corrected (later termed V1 in Stage 2)
+    \item \textbf{Baselines}: Control Passthrough, Mean Shift Ablation, Nearest-Cell-Line, Cross-Cell-Line (DMSO-corrected), State Model
 \end{itemize}
 
 \subsubsection{Results: Few-Shot Generalization}
@@ -248,8 +249,6 @@ We first evaluated all baselines using global processing (ignoring plate boundar
 \midrule
 State Model & 0.032 & 0.279 \\
 Mean Shift Ablation & 0.036 & 0.299 \\
-Cross-Cell-Line (raw mean) & 0.077 & 0.744 \\
-Nearest-Cell-Line & 0.078 & 0.748 \\
 Control Passthrough & 0.078 & 0.757 \\
 \bottomrule
 \end{tabular}
@@ -273,7 +272,7 @@ Control Passthrough & 0.078 & 0.757 \\
 \textbf{Method} & \textbf{RBF MMD} & \textbf{Energy MMD} \\
 \midrule
 Mean Shift Ablation & 0.037 & 0.006 \\
-Cross-Cell-Line (raw mean) & 0.061 & 0.010 \\
+Cross-Cell-Line (DMSO-corrected) & 0.061 & 0.010 \\
 Control Passthrough & 0.078 & 0.015 \\
 Nearest-Cell-Line & 0.170 & 0.035 \\
 State Model & 0.669 & 0.082 \\
@@ -292,11 +291,11 @@ State Model & 0.669 & 0.082 \\
 
 Initial experiments revealed:
 \begin{itemize}
-    \item Mean shift ablation (oracle) establishes an upper bound on achievable performance
-    \item Simple mean shift baselines competitive with State model in few-shot setting
-    \item Zero-shot generalization significantly more challenging than few-shot
+    \item Mean shift ablation (oracle) establishes an upper bound on achievable performance in both few-shot and zero-shot
+    \item State model competitive with oracle in few-shot setting (0.032 vs 0.036 RBF MMD)
+    \item Zero-shot generalization significantly more challenging: State model dramatically underperforms (0.669 RBF MMD) while simple baselines remain effective
     \item Scale correction ($\div 40$) critical for zero-shot evaluation
-    \item Need for batch-aware processing motivated Stage 2 experiments
+    \item Need for batch-aware processing and additional baseline variants motivated Stage 2 experiments
 \end{itemize}
 
 \subsection{Stage 2: Per-Plate Processing with Enhanced Baselines}
@@ -310,13 +309,13 @@ Analysis of Stage 1 results revealed that ignoring plate boundaries degraded per
     \item Per-plate processing would improve nearest-cell-line and cross-cell-line methods
 \end{enumerate}
 
-Additionally, we introduced Cross-Cell-Line V1 (DMSO-corrected) to test whether explicit baseline correction improves over raw averaging (V2).
+Additionally, we introduced a second cross-cell-line variant (V2) to investigate whether using the test cell line's DMSO mean instead of correcting each training cell line's baseline would affect performance. This allowed us to compare the original DMSO-corrected approach (V1) against an alternative that computes shifts relative to the target cell line's baseline (V2).
 
 \subsubsection{Experimental Setup}
 
 \begin{itemize}
     \item \textbf{Per-plate processing}: All operations restricted to within-plate data
-    \item \textbf{New baseline}: Cross-Cell-Line V1 (DMSO-corrected) added
+    \item \textbf{Cross-cell-line variants}: V1 (DMSO-corrected, from Stage 1) and V2 (test mean, newly introduced)
     \item \textbf{Plate encoding fix}: Implemented decoder to handle one-hot plate arrays
     \item \textbf{Control mapping}: Per (cell line, plate) instead of global
     \item \textbf{Same splits}: Identical few-shot and zero-shot test sets as Stage 1
