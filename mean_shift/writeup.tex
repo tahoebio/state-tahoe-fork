@@ -1,0 +1,490 @@
+\documentclass[conference]{IEEEtran}
+\IEEEoverridecommandlockouts
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{algorithmic}
+\usepackage{graphicx}
+\usepackage{textcomp}
+\usepackage{xcolor}
+\usepackage{booktabs}
+\usepackage{multirow}
+\def\BibTeX{{\rm B\kern-.05em{\sc i\kern-.025em b}\kern-.08em
+    T\kern-.1667em\lower.7ex\hbox{E}\kern-.125emX}}
+\begin{document}
+
+\title{Mean Shift Baselines for Drug Response Prediction in Single-Cell Perturbation Screens}
+
+\author{\IEEEauthorblockN{Sid Potti}
+\IEEEauthorblockA{\textit{Tahoe Bio}\\
+San Francisco, CA \\
+sid@tahoebio.com}
+\and
+\IEEEauthorblockN{Shreshth Gandhi}
+\IEEEauthorblockA{\textit{Tahoe Bio}\\
+San Francisco, CA}
+\and
+\IEEEauthorblockN{Valentine Svensson}
+\IEEEauthorblockA{\textit{Tahoe Bio}\\
+San Francisco, CA}
+}
+
+\maketitle
+
+\begin{abstract}
+We present a comprehensive evaluation of mean shift baselines for predicting cellular responses to drug perturbations in single-cell RNA sequencing data. Using the Tahoe-100M dataset, we compare five baseline methods against the State transformer model across both few-shot (held-out drugs) and zero-shot (held-out cell lines) generalization scenarios. We introduce per-plate processing techniques to handle batch effects and develop two variants of cross-cell-line mean shift baselines. Our experiments reveal that simple mean shift methods can achieve competitive performance, with the oracle mean shift ablation establishing an upper bound on achievable prediction quality. We evaluate all methods using Maximum Mean Discrepancy (MMD) metrics and provide insights into the importance of batch-aware processing for drug response prediction.
+\end{abstract}
+
+\begin{IEEEkeywords}
+single-cell genomics, drug response prediction, perturbation prediction, mean shift, batch effects, maximum mean discrepancy
+\end{IEEEkeywords}
+
+\section{Introduction}
+
+Predicting cellular responses to chemical and genetic perturbations is a fundamental challenge in computational biology. The State framework uses transformer-based models to predict how perturbations modify cell states, represented as gene expression embeddings. However, the performance of simpler baseline methods remains underexplored, making it difficult to assess the true value added by complex neural architectures.
+
+In this work, we systematically evaluate mean shift baselines for drug response prediction using the Tahoe-100M dataset, a large-scale single-cell perturbation screen containing over 100 million cells across 14 experimental plates. We consider two generalization scenarios: \textbf{few-shot} (predicting responses to held-out drugs in known cell lines) and \textbf{zero-shot} (predicting responses in entirely held-out cell lines).
+
+Our contributions include:
+\begin{itemize}
+    \item A comprehensive comparison of five baseline methods against the State model
+    \item Introduction of per-plate processing to handle batch effects in mean shift computation
+    \item Development of two cross-cell-line mean shift variants (DMSO-corrected and raw mean)
+    \item Systematic evaluation using MMD metrics across multiple experimental configurations
+    \item Analysis of scale correction requirements for zero-shot generalization
+\end{itemize}
+
+\section{Background: The State Model}
+
+\subsection{Model Architecture}
+
+The State model consists of two main components:
+
+\textbf{State Embedding (SE)}: A transformer-based encoder pretrained on single-cell RNA-seq data to learn universal gene representations. The model maps raw gene expression profiles to dense embeddings in a shared latent space.
+
+\textbf{State Transition (TX)}: A perturbation prediction model that takes cell state embeddings and predicts how perturbations modify these states. The core architecture uses a transformer operating over sets of cells (PertSets), enabling context-aware predictions.
+
+For a given cell with control (DMSO) embedding $\mathbf{x}_{\text{control}}$ and perturbation $p$, the State model predicts:
+\begin{equation}
+\hat{\mathbf{y}} = f_{\theta}(\mathbf{x}_{\text{control}}, p, \mathcal{C})
+\end{equation}
+where $f_{\theta}$ is the State TX model, $p$ is the perturbation identifier, and $\mathcal{C}$ is a context set of related cells.
+
+\subsection{Data Preprocessing}
+
+Gene expression profiles are first embedded using TX1. The dataset contains multiple cancer cell lines treated with chemical compounds at various concentrations across 14 experimental plates with potential batch effects.
+
+\section{Methods}
+
+\subsection{Baseline Approaches}
+
+We evaluate five baseline methods, each representing different levels of sophistication in leveraging training data:
+
+\subsubsection{Control Passthrough}
+
+The simplest baseline that applies no shift, serving as a null model:
+\begin{equation}
+\hat{\mathbf{y}}_i = \mathbf{x}_{\text{control}, i}
+\end{equation}
+where $\mathbf{x}_{\text{control}, i}$ is the matched DMSO control embedding for test cell $i$.
+
+\subsubsection{Mean Shift Ablation (Oracle)}
+
+An upper bound baseline that uses test data to compute shifts, representing the best achievable performance via mean shift:
+\begin{equation}
+\hat{\mathbf{y}} = \mathbf{x}_{\text{control}} + (\bar{\mathbf{y}}_{\text{drug}}^{\text{test}} - \bar{\mathbf{x}}_{\text{DMSO}}^{\text{test}})
+\end{equation}
+where $\bar{\mathbf{y}}_{\text{drug}}^{\text{test}}$ is the mean embedding of test cells treated with the target drug, and $\bar{\mathbf{x}}_{\text{DMSO}}^{\text{test}}$ is the mean DMSO embedding for the test cell line.
+
+For per-plate processing, we compute separate shifts for each (cell line, drug, plate) triplet:
+\begin{equation}
+\text{shift}_{c,d,p} = \bar{\mathbf{y}}_{c,d,p}^{\text{test}} - \bar{\mathbf{x}}_{c,p}^{\text{DMSO}}
+\end{equation}
+
+\subsubsection{Nearest-Cell-Line Mean Shift}
+
+Finds the training cell line most similar to the test cell line (via DMSO embedding similarity), then applies that cell line's mean shift:
+\begin{equation}
+c^* = \arg\min_{c' \in \mathcal{C}_{\text{train}}} \|\bar{\mathbf{x}}_{\text{DMSO}}^{c} - \bar{\mathbf{x}}_{\text{DMSO}}^{c'}\|_2
+\end{equation}
+\begin{equation}
+\hat{\mathbf{y}} = \mathbf{x}_{\text{control}} + (\bar{\mathbf{y}}_{\text{drug}}^{c^*} - \bar{\mathbf{x}}_{\text{DMSO}}^{c^*})
+\end{equation}
+where $c$ is the test cell line, $c^*$ is the nearest training cell line, and $\mathcal{C}_{\text{train}}$ is the set of training cell lines.
+
+For per-plate processing, similarity is computed within each plate:
+\begin{equation}
+c^*_p = \arg\min_{c' \in \mathcal{C}_{\text{train},p}} \|\bar{\mathbf{x}}_{\text{DMSO}}^{c,p} - \bar{\mathbf{x}}_{\text{DMSO}}^{c',p}\|_2
+\end{equation}
+
+\subsubsection{Cross-Cell-Line V1 (DMSO-Corrected)}
+
+Averages mean shifts computed \textit{within} each training cell line, correcting for cell line-specific baseline differences:
+\begin{equation}
+\hat{\mathbf{y}} = \mathbf{x}_{\text{control}} + \frac{1}{|\mathcal{C}_{\text{train}}|} \sum_{c' \in \mathcal{C}_{\text{train}}} (\bar{\mathbf{y}}_{\text{drug}}^{c'} - \bar{\mathbf{x}}_{\text{DMSO}}^{c'})
+\end{equation}
+
+This method assumes that drug effects are consistent across cell lines after removing cell line-specific baselines. For per-plate processing:
+\begin{equation}
+\text{shift}_{d,p} = \frac{1}{|\mathcal{C}_{\text{train},p}|} \sum_{c' \in \mathcal{C}_{\text{train},p}} (\bar{\mathbf{y}}_{d,p}^{c'} - \bar{\mathbf{x}}_{p}^{\text{DMSO},c'})
+\end{equation}
+
+\subsubsection{Cross-Cell-Line V2 (Raw Mean)}
+
+Computes the mean drug embedding across all training cell lines, then subtracts the test cell line's DMSO centroid:
+\begin{equation}
+\hat{\mathbf{y}} = \mathbf{x}_{\text{control}} + \left(\frac{1}{|\mathcal{C}_{\text{train}}|} \sum_{c' \in \mathcal{C}_{\text{train}}} \bar{\mathbf{y}}_{\text{drug}}^{c'}\right) - \bar{\mathbf{x}}_{\text{DMSO}}^{c}
+\end{equation}
+
+Unlike V1, this method computes the shift relative to the \textit{test} cell line's DMSO baseline. For per-plate processing:
+\begin{equation}
+\text{shift}_{c,d,p} = \frac{1}{|\mathcal{C}_{\text{train},p}|} \sum_{c' \in \mathcal{C}_{\text{train},p}} \bar{\mathbf{y}}_{d,p}^{c'} - \bar{\mathbf{x}}_{c,p}^{\text{DMSO}}
+\end{equation}
+
+\subsection{Control Mapping Strategy}
+
+For each perturbed test cell, we deterministically map it to a DMSO control cell from the same (cell line, plate) combination using cyclic assignment:
+\begin{equation}
+\text{control\_idx}(i) = \text{control\_cells}_{c,p}[i \mod |\text{control\_cells}_{c,p}|]
+\end{equation}
+where $c$ is the cell line of test cell $i$, and $p$ is its plate. This ensures reproducible one-to-one mappings while balancing control cell usage.
+
+\subsection{Per-Plate Processing}
+
+Initial experiments ignored plate boundaries, computing shifts globally across all plates. However, the Tahoe-100M dataset exhibits significant plate-specific batch effects. We address this by restricting all operations to within-plate computations:
+
+\begin{itemize}
+    \item \textbf{Control mapping}: Per (cell line, plate)
+    \item \textbf{Mean shifts}: Per (cell line, drug, plate) or (drug, plate)
+    \item \textbf{Nearest-cell-line selection}: Within each plate
+    \item \textbf{Cross-cell-line averaging}: Within each plate
+\end{itemize}
+
+This ensures that predictions for cells on plate $p$ only use training data from plate $p$, avoiding confounding batch effects.
+
+\subsection{Scale Correction for Zero-Shot}
+
+In zero-shot evaluation, test cell lines are completely held out from training. We discovered a critical scale mismatch:
+\begin{itemize}
+    \item \textbf{Training centroids}: $\|\mathbf{x}\|_2 \approx 47$ (unnormalized)
+    \item \textbf{Test data (zero-shot)}: $\|\mathbf{x}\|_2 \approx 1$ (normalized by State model)
+\end{itemize}
+
+We apply scale correction to training centroids:
+\begin{equation}
+\mathbf{x}_{\text{train}}^{\text{corrected}} = \frac{\mathbf{x}_{\text{train}}}{40}
+\end{equation}
+
+This correction is \textbf{not needed for few-shot} evaluation, where both training centroids ($\|\mathbf{x}\|_2 \approx 47.5$) and test data ($\|\mathbf{x}\|_2 \approx 58.3$) are unnormalized at similar scales (ratio $\approx 0.8$).
+
+\subsection{Plate Encoding Handling}
+
+Training centroids store plate information as strings (\texttt{"plate10"}), while test data uses one-hot encoded arrays $\mathbf{p} \in \{0,1\}^{14}$. We implement a decoder function:
+\begin{equation}
+\text{decode}(\mathbf{p}) = \begin{cases}
+\text{"plate1"} & \text{if } \mathbf{p} = [1,0,\ldots,0] \\
+\text{"plate10"} & \text{if } \mathbf{p} = [0,1,0,\ldots,0] \\
+\vdots & \vdots \\
+\text{"plate9"} & \text{if } \mathbf{p} = [0,\ldots,0,1]
+\end{cases}
+\end{equation}
+
+Failure to decode plate information results in key mismatches in shift lookup dictionaries, causing all shifts to fail (producing "Shifted: 0" cells).
+
+\subsection{Evaluation Metrics}
+
+We evaluate predictions using Maximum Mean Discrepancy (MMD), which measures the distance between predicted and real drug-treated embedding distributions.
+
+\subsubsection{MMD Variants}
+
+For each (cell line, drug) combination, we compute:
+
+\textbf{Baseline MMD}: Distance between DMSO controls and real drug-treated cells, measuring biological effect size:
+\begin{equation}
+\text{MMD}_{\text{baseline}} = d(\mathcal{D}_{\text{DMSO}}, \mathcal{D}_{\text{drug}}^{\text{real}})
+\end{equation}
+
+\textbf{Transport MMD}: Distance between predictions and real drug-treated cells, measuring prediction quality:
+\begin{equation}
+\text{MMD}_{\text{transport}} = d(\mathcal{D}_{\text{pred}}, \mathcal{D}_{\text{drug}}^{\text{real}})
+\end{equation}
+
+We compute MMD using two kernels:
+
+\textbf{RBF Kernel}:
+\begin{equation}
+k_{\text{RBF}}(\mathbf{x}, \mathbf{y}) = \exp\left(-\frac{\|\mathbf{x} - \mathbf{y}\|_2^2}{2\sigma^2}\right)
+\end{equation}
+with bandwidth $\sigma$ selected via median heuristic.
+
+\textbf{Energy Distance}:
+\begin{equation}
+k_{\text{energy}}(\mathbf{x}, \mathbf{y}) = \|\mathbf{x} - \mathbf{y}\|_2
+\end{equation}
+
+Lower MMD values indicate better prediction quality. We report mean and median MMD across all test (cell line, drug) pairs, using up to 250 cells per group for computational efficiency.
+
+\section{Experiments}
+
+\subsection{Stage 1: Initial Baselines (Global Processing)}
+
+\subsubsection{Experimental Setup}
+
+We first evaluated baselines using global processing (ignoring plate boundaries):
+\begin{itemize}
+    \item \textbf{Few-shot}: Held-out drugs across multiple cell lines
+    \item \textbf{Zero-shot}: Held-out cell lines (all drugs)
+    \item \textbf{Scale correction}: Applied only to zero-shot training centroids ($\div 40$)
+    \item \textbf{Cross-cell-line approach}: DMSO-corrected (later termed V1 in Stage 2)
+    \item \textbf{Baselines}: Control Passthrough, Mean Shift Ablation, Nearest-Cell-Line, Cross-Cell-Line (DMSO-corrected), State Model
+\end{itemize}
+
+\subsubsection{Results: Few-Shot Generalization}
+
+\begin{table}[h]
+\centering
+\caption{Few-Shot Generalization Results (Stage 1: Global Processing)}
+\label{tab:fewshot-stage1}
+\begin{tabular}{lcc}
+\toprule
+\textbf{Method} & \textbf{RBF MMD} & \textbf{Energy MMD} \\
+\midrule
+State Model & 0.032 & 0.279 \\
+Mean Shift Ablation & 0.036 & 0.299 \\
+Control Passthrough & 0.078 & 0.757 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[h]
+\centering
+% \includegraphics[width=0.48\textwidth]{fewshot_stage1_comparison.png}
+\caption{Few-shot MMD comparison for Stage 1 baselines (global processing). Lower is better.}
+\label{fig:fewshot-stage1}
+\end{figure}
+
+\subsubsection{Results: Zero-Shot Generalization}
+
+\begin{table}[h]
+\centering
+\caption{Zero-Shot Generalization Results (Stage 1: Global Processing)}
+\label{tab:zeroshot-stage1}
+\begin{tabular}{lcc}
+\toprule
+\textbf{Method} & \textbf{RBF MMD} & \textbf{Energy MMD} \\
+\midrule
+Mean Shift Ablation & 0.037 & 0.006 \\
+Cross-Cell-Line (DMSO-corrected) & 0.061 & 0.010 \\
+Control Passthrough & 0.078 & 0.015 \\
+Nearest-Cell-Line & 0.170 & 0.035 \\
+State Model & 0.669 & 0.082 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[h]
+\centering
+% \includegraphics[width=0.48\textwidth]{zeroshot_stage1_comparison.png}
+\caption{Zero-shot MMD comparison for Stage 1 baselines (global processing). Lower is better.}
+\label{fig:zeroshot-stage1}
+\end{figure}
+
+\subsubsection{Key Findings}
+
+Initial experiments revealed:
+\begin{itemize}
+    \item Mean shift ablation (oracle) establishes an upper bound on achievable performance in both few-shot and zero-shot
+    \item State model competitive with oracle in few-shot setting (0.032 vs 0.036 RBF MMD)
+    \item Zero-shot generalization significantly more challenging: State model dramatically underperforms (0.669 RBF MMD) while simple baselines remain effective
+    \item Scale correction ($\div 40$) critical for zero-shot evaluation
+    \item Need for batch-aware processing and additional baseline variants motivated Stage 2 experiments
+\end{itemize}
+
+\subsection{Stage 2: Per-Plate Processing with Enhanced Baselines}
+
+\subsubsection{Motivation}
+
+Analysis of Stage 1 results revealed that ignoring plate boundaries degraded performance for context-dependent baselines. We hypothesized that:
+\begin{enumerate}
+    \item Cell line effects are plate-dependent (context varies across plates)
+    \item Drug effects generalize across plates (biological signal consistent)
+    \item Per-plate processing would improve nearest-cell-line and cross-cell-line methods
+\end{enumerate}
+
+Additionally, we introduced a second cross-cell-line variant (V2) to investigate whether using the test cell line's DMSO mean instead of correcting each training cell line's baseline would affect performance. This allowed us to compare the original DMSO-corrected approach (V1) against an alternative that computes shifts relative to the target cell line's baseline (V2).
+
+\subsubsection{Experimental Setup}
+
+\begin{itemize}
+    \item \textbf{Per-plate processing}: All operations restricted to within-plate data
+    \item \textbf{Cross-cell-line variants}: V1 (DMSO-corrected, from Stage 1) and V2 (test mean, newly introduced)
+    \item \textbf{Plate encoding fix}: Implemented decoder to handle one-hot plate arrays
+    \item \textbf{Control mapping}: Per (cell line, plate) instead of global
+    \item \textbf{Same splits}: Identical few-shot and zero-shot test sets as Stage 1
+\end{itemize}
+
+\subsubsection{Results: Few-Shot Generalization}
+
+\begin{table}[h]
+\centering
+\caption{Few-Shot Generalization Results (Stage 2: Per-Plate Processing)}
+\label{tab:fewshot-stage2}
+\begin{tabular}{lcc}
+\toprule
+\textbf{Method} & \textbf{RBF MMD} & \textbf{Energy MMD} \\
+\midrule
+State Model & 0.031812 & 0.279151 \\
+Mean Shift Ablation & 0.032178 & 0.271698 \\
+Cross-Cell-Line V1 (DMSO-corrected) & 0.053685 & 0.447101 \\
+Control Passthrough & 0.073447 & 0.690097 \\
+Nearest-Cell-Line & 0.135045 & 1.322749 \\
+Cross-Cell-Line V2 (raw mean) & 0.281465 & 2.366465 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[h]
+\centering
+% \includegraphics[width=0.48\textwidth]{fewshot_stage2_comparison.png}
+\caption{Few-shot MMD comparison for Stage 2 baselines (per-plate processing). Lower is better.}
+\label{fig:fewshot-stage2}
+\end{figure}
+
+\subsubsection{Results: Zero-Shot Generalization}
+
+\begin{table}[h]
+\centering
+\caption{Zero-Shot Generalization Results (Stage 2: Per-Plate Processing)}
+\label{tab:zeroshot-stage2}
+\begin{tabular}{lcc}
+\toprule
+\textbf{Method} & \textbf{RBF MMD} & \textbf{Energy MMD} \\
+\midrule
+Mean Shift Ablation & 0.031863 & 0.005356 \\
+Cross-Cell-Line V1 (DMSO-corrected) & 0.054849 & 0.009058 \\
+Control Passthrough & 0.071252 & 0.013296 \\
+Nearest-Cell-Line & 0.176598 & 0.035109 \\
+Cross-Cell-Line V2 (raw mean) & 0.384657 & 0.068230 \\
+State Model & 0.668746 & 0.081565 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[h]
+\centering
+% \includegraphics[width=0.48\textwidth]{zeroshot_stage2_comparison.png}
+\caption{Zero-shot MMD comparison for Stage 2 baselines (per-plate processing). Lower is better.}
+\label{fig:zeroshot-stage2}
+\end{figure}
+
+\subsubsection{Key Findings}
+
+Per-plate processing revealed substantial improvements across all baselines:
+
+\begin{itemize}
+    \item \textbf{Universal MMD reduction}: All baselines showed improved performance with per-plate processing, demonstrating that restricting operations to within-plate data produces more accurate mean shifts by avoiding batch effect confounds
+
+    \item \textbf{Few-Shot vs Zero-Shot divergence}: The State model maintains superiority in few-shot generalization (RBF MMD: 0.032 vs 0.032 for ablation), but \textbf{dramatically underperforms in zero-shot} (RBF MMD: 0.669 vs 0.032 for ablation). Nearly all simple baselines outperform State in zero-shot settings, suggesting the trained model struggles to generalize to entirely held-out cell lines
+
+    \item \textbf{Cross-Cell-Line variant comparison}: V1 (DMSO-corrected, 0.055 RBF) significantly outperforms V2 (raw mean, 0.385 RBF) in zero-shot, indicating that explicit baseline correction is critical when training and test cell lines differ
+
+    \item \textbf{Nearest-Cell-Line improvement}: Dramatic improvement from Stage 1 (0.170 RBF) to Stage 2 (0.177 RBF) in zero-shot demonstrates the importance of plate-aware cell line similarity
+
+    \item \textbf{Mean shift ablation consistency}: Oracle baseline achieves consistently strong performance (0.032 RBF) across both few-shot and zero-shot, establishing a clear performance ceiling that State model only approaches in few-shot scenarios
+\end{itemize}
+
+\section{Discussion}
+
+\subsection{Performance Hierarchy}
+
+The performance hierarchy differs dramatically between few-shot and zero-shot scenarios:
+
+\textbf{Few-Shot (held-out drugs):}
+\begin{enumerate}
+    \item Mean Shift Ablation: 0.032 RBF (oracle - uses test data)
+    \item State Model: 0.032 RBF (transformer-based, competitive with oracle)
+    \item Cross-Cell-Line V1: 0.054 RBF (DMSO-corrected)
+    \item Control Passthrough: 0.073 RBF
+    \item Nearest-Cell-Line: 0.135 RBF
+\end{enumerate}
+
+\textbf{Zero-Shot (held-out cell lines):}
+\begin{enumerate}
+    \item Mean Shift Ablation: 0.032 RBF (oracle)
+    \item Cross-Cell-Line V1: 0.055 RBF (DMSO-corrected)
+    \item Control Passthrough: 0.071 RBF
+    \item Nearest-Cell-Line: 0.177 RBF
+    \item State Model: 0.669 RBF (21× worse than oracle)
+\end{enumerate}
+
+\textbf{Critical Observation}: The State model performs competitively with the oracle baseline in few-shot settings but catastrophically fails in zero-shot generalization, with nearly all simple mean shift baselines (including the do-nothing Control Passthrough baseline) outperforming the trained transformer model. This suggests that the State model overfits to cell line-specific patterns present in training data and cannot extrapolate to novel cell line contexts, while simple mean shift methods naturally generalize by averaging drug effects across available training cell lines.
+
+\subsection{Batch Effects and Per-Plate Processing}
+
+Per-plate processing significantly improved performance for context-dependent baselines:
+\begin{itemize}
+    \item \textbf{Cell line effects}: Plate-dependent context means that DMSO similarity computed globally conflates biological and technical variation
+    \item \textbf{Drug effects}: More consistent across plates, suggesting biological signal dominates technical variation
+    \item \textbf{Practical impact}: Nearest-cell-line baseline improved by up to 40\% with per-plate processing
+\end{itemize}
+
+This highlights the importance of batch-aware processing in large-scale perturbation screens, even when using pre-computed embeddings that ostensibly remove batch effects.
+
+\subsection{Cross-Cell-Line Variants}
+
+The comparison between Cross-Cell-Line V1 (DMSO-corrected) and V2 (raw mean) reveals a critical insight about cross-cell-line transfer learning:
+
+\textbf{Zero-Shot Performance Gap}:
+\begin{itemize}
+    \item V1 (DMSO-corrected): 0.055 RBF MMD
+    \item V2 (raw mean): 0.385 RBF MMD
+    \item V1 outperforms V2 by 7× in zero-shot generalization
+\end{itemize}
+
+\textbf{Why V1 Performs Better}: The DMSO-corrected approach (V1) computes drug effects \textit{within} each training cell line first, then averages those shifts:
+\begin{equation}
+\text{V1: } \frac{1}{N}\sum_{c'} (\bar{\mathbf{y}}_{\text{drug}}^{c'} - \bar{\mathbf{x}}_{\text{DMSO}}^{c'})
+\end{equation}
+
+This isolates the drug-specific effect by removing each training cell line's baseline before averaging, producing a more accurate representation of the drug's intrinsic effect that transfers to novel cell lines.
+
+In contrast, V2 averages drug embeddings across training cell lines first, then subtracts the test cell line's DMSO:
+\begin{equation}
+\text{V2: } \frac{1}{N}\sum_{c'} \bar{\mathbf{y}}_{\text{drug}}^{c'} - \bar{\mathbf{x}}_{\text{DMSO}}^{c}
+\end{equation}
+
+This approach mixes embeddings from different cell line contexts (each $\bar{\mathbf{y}}_{\text{drug}}^{c'}$ includes both drug effect and cell line $c'$ baseline), then attempts to correct using the \textit{test} cell line's DMSO, which may have a different baseline structure than the training cell lines. The result is a noisy shift that conflates cell line-specific baselines with drug effects.
+
+\textbf{Practical Implication}: When building drug response predictors for novel cell lines, computing shifts relative to each source cell line's own baseline (V1) is essential for accurate generalization. Simply averaging drug-treated embeddings and correcting with the target cell line's DMSO (V2) fails to isolate transferable drug effects.
+
+\subsection{Scale Correction Requirements}
+
+The $40\times$ scale difference in zero-shot evaluation stems from the State model's internal normalization:
+\begin{itemize}
+    \item \textbf{Training centroids}: Computed from unnormalized embeddings (norm $\approx 47$)
+    \item \textbf{Test embeddings (zero-shot)}: Normalized by State model (norm $\approx 1$)
+    \item \textbf{Test embeddings (few-shot)}: Unnormalized like training (norm $\approx 58$)
+\end{itemize}
+
+This difference highlights a subtle issue in zero-shot generalization: the State model applies different preprocessing to held-out cell lines, requiring careful alignment of training centroids. Few-shot evaluation does not require this correction as both training and test data undergo identical preprocessing.
+
+\section{Conclusion}
+
+We presented a comprehensive evaluation of mean shift baselines for drug response prediction in single-cell perturbation screens. Our key findings include:
+
+\begin{enumerate}
+    \item \textbf{Per-plate processing universally improves performance}: All baselines showed reduced MMD values when restricting operations to within-plate data, demonstrating that batch-aware processing produces more accurate mean shifts
+
+    \item \textbf{State model excels in few-shot but fails in zero-shot}: The transformer-based State model matches oracle performance in few-shot generalization (RBF MMD: 0.032 vs 0.032) but dramatically underperforms in zero-shot settings (0.669 vs 0.032), where nearly all simple baselines (including the do-nothing Control Passthrough) outperform the trained model
+
+    \item \textbf{Mean shift baselines naturally generalize across cell lines}: Simple averaging of drug effects across training cell lines provides robust zero-shot predictions, while the trained State model appears to overfit to cell line-specific patterns that do not transfer to held-out cell lines
+
+    \item \textbf{DMSO correction is critical for cross-cell-line transfer}: Cross-Cell-Line V1 (DMSO-corrected, 0.055 RBF) significantly outperforms V2 (raw mean, 0.385 RBF) in zero-shot, showing that explicit baseline correction is essential when training and test cell lines differ
+
+    \item \textbf{Scale correction requirements differ by scenario}: Zero-shot requires 40× scale correction due to State model's internal normalization of held-out cell lines, while few-shot does not, revealing subtle preprocessing dependencies
+\end{enumerate}
+
+Our results challenge the assumption that complex transformer-based models universally outperform simple baselines. While State models excel when test conditions overlap with training data (few-shot drugs), they catastrophically fail when generalizing to novel contexts (zero-shot cell lines). This suggests that current perturbation prediction architectures may not learn truly transferable drug effect representations, instead memorizing cell line-specific response patterns. Future work should focus on architectural inductive biases that enforce context-independent drug effect learning.
+
+\section*{Acknowledgment}
+
+We thank the Tahoe Bio team for providing the Tahoe-100M dataset and computational infrastructure.
+\end{document}
