@@ -177,6 +177,17 @@ def run_tx_predict(args: ap.ArgumentParser):
         **model_kwargs,
     }
 
+    import torch as _torch
+    _ckpt_blob = _torch.load(checkpoint_path, map_location='cpu', weights_only=False)
+    _hp = _ckpt_blob.get('hyper_parameters', {}) or {}
+
+    # Override every dimension the checkpoint knows about
+    for _key in ('pert_dim', 'batch_dim', 'gene_dim', 'input_dim', 'output_dim',
+                'hidden_dim', 'hvg_dim', 'cell_set_len'):
+        if _key in _hp and _key in model_init_kwargs and model_init_kwargs[_key] != _hp[_key]:
+            print(f"[predict] Overriding {_key}: data_module={model_init_kwargs[_key]} → checkpoint={_hp[_key]}")
+            model_init_kwargs[_key] = _hp[_key]
+
     model = ModelClass.load_from_checkpoint(checkpoint_path, **model_init_kwargs)
     model.eval()
     logger.info("Model loaded successfully.")

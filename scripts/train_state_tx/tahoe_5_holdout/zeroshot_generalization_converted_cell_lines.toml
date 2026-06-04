@@ -1,5 +1,5 @@
 [datasets]
-tahoe = "/tahoe/drive_3/ANALYSIS/analysis_190/Data/state_input_merged/by_plate/"
+tahoe = "/nvme-shared/datasets/state_input_merged/by_plate/"
 
 [training]
 tahoe = "train"

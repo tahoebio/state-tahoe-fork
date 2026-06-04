@@ -109,7 +109,8 @@ def get_loggers(
                 tags=cfg["wandb"].get("tags", []) if cfg else [],
             )
             if cfg is not None:
-                wandb_logger.experiment.config.update(cfg)
+                # wandb_logger.experiment.config.update(cfg)
+                wandb_logger.experiment.config.update(cfg, allow_val_change=True)
             loggers.append(wandb_logger)
         except ImportError:
             print("Warning: wandb is not installed. Skipping wandb logging.")

@@ -1,0 +1,14 @@
+[datasets]
+tahoe = "/nvme-shared/datasets/state_input_merged/by_plate/"
+
+[training]
+tahoe = "train"
+
+[zeroshot]
+"tahoe.CVCL_1716" = "test"
+"tahoe.CVCL_0218" = "test"
+"tahoe.CVCL_0028" = "test"
+"tahoe.CVCL_0428" = "test"
+"tahoe.CVCL_0397" = "test"
+
+[fewshot]
